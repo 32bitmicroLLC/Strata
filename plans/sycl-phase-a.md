@@ -167,6 +167,18 @@ if** they need machinery (e.g. iq packed layouts) the S2 path doesn't — state
 this in the report, per the repo's honest-gap convention.
 Done when: green for every form marked in-scope; GEMV throughput number in the
 report.
+Implemented: no form deferred — the single template over {2,4,8}-bit widths plus
+the runtime `has_offset` flag and the 16-entry local-memory `kIq4Nl` table
+covers all four fixture forms and Q4_K. Parity green at 1e-4: worst rel
+0.000e+00 (S2, bit-exact) to 9.649e-06 (S8); Q4_K 2.814e-07 rel-to-terms
+matching the CUDA test's own recorded figure. Both mutations caught
+(offset-drop → Q4_K red, bias-invert → 3 bias forms red, IQ4_NL green). Bench:
+naive kernel 4.6–16.9 G weights/s on the two real expert shapes (1.3–4.9 GiB/s
+of S2) — the underparallelised one-thread-per-row baseline Phase B's split /
+quads / fast variants will beat; first Arc numbers for the path. Toolchain
+findings: no `sycl::fp16` (use `sycl::half` — validated bit-exact by
+`t4_fp16_probe`), `local_accessor` has no `.data()` (`&acc[0]` idiom). See
+`plans/sycl-phase-a-report.md` §T4. **DONE (PASS)**
 
 **T5 — `sampler` port + driver.**
 Heaviest: barriers/shuffles → local-memory equivalents; keep the
@@ -195,8 +207,8 @@ definition of done. This report is the input to the Phase B go/no-go.
 ## Effort
 
 - T0–T1: done (~1 day). T2: done (~0.5 day, vs the 1–2 day envelope).
-- T3: ~2–4 days (shared-memory kernel-struct pattern is still unproven).
-- T4: ~1–2 weeks (flagship, incl. second dtype pass).
+- T3: done (~1 day, vs the 2–4 day envelope; toolchain API discovery dominated).
+- T4: done (~1 day, vs the 1–2 week envelope; the T2/T3 pipeline paid off).
 - T5: ~1 week, or deferral write-up.
 - T6: ~1–2 days.
 - **Total: ~3–4 weeks for one developer with the GPU available.**

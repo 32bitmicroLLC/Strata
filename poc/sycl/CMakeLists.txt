@@ -52,7 +52,10 @@ foreach(_d IN LISTS _rpath_dirs)
   list(APPEND _rpath_opts "-Wl,-rpath,${_d}")
 endforeach()
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# The repo's include/ is on the path so the PoC can reuse the real API headers
+# (SForm/Codebook) and the host dequantizer chain (dequant.hpp) unmodified.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 
 enable_testing()
 
@@ -77,6 +80,12 @@ add_library(k_router_top10 STATIC kernels/router_top10.cpp)
 add_executable(k_router_top10_parity drivers/router_top10_parity.cpp)
 target_link_libraries(k_router_top10_parity PRIVATE k_router_top10)
 
+# T4: the flagship S-family GEMV (plans/sycl-phase-a-t4.md).
+add_executable(t4_fp16_probe t4/fp16_probe.cpp)
+add_library(k_s_gemv STATIC kernels/s_gemv.cpp)
+add_executable(k_s_gemv_parity drivers/s_gemv_parity.cpp)
+target_link_libraries(k_s_gemv_parity PRIVATE k_s_gemv)
+
 add_executable(t0_dev0        t0/dev0.cpp)
 add_executable(t0_bw_probe    t0/bw_probe.cpp)
 add_executable(t0_bw_spike    t0/bw_spike.cpp)
@@ -85,6 +94,9 @@ add_test(NAME smoke_parity COMMAND smoke_parity)
 add_test(NAME k_dequant_s2_parity COMMAND k_dequant_s2_parity --selftest)
 add_test(NAME t3_sg_probe   COMMAND t3_sg_probe)
 add_test(NAME k_router_top10_parity COMMAND k_router_top10_parity --selftest)
+add_test(NAME t4_fp16_probe   COMMAND t4_fp16_probe)
+add_test(NAME k_s_gemv_parity COMMAND k_s_gemv_parity --selftest)
+add_test(NAME k_s_gemv_bench  COMMAND k_s_gemv_parity --bench --iters 50)
 add_test(NAME t0_dev0      COMMAND t0_dev0)
 add_test(NAME t0_bw_probe  COMMAND t0_bw_probe)
 add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gate passes
@@ -93,7 +105,7 @@ add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gat
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
 # CMAKE_CXX_LINK_OPTIONS does not reach the link line on CMake 4.2, per-target
 # LINK_OPTIONS does.
-foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t0_dev0 t0_bw_probe t0_bw_spike)
+foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe k_s_gemv_parity t0_dev0 t0_bw_probe t0_bw_spike)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -104,5 +116,6 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t0_
   endif()
 endforeach()
 
-set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t0_dev0 t0_bw_probe
-                      t0_bw_gate PROPERTIES TIMEOUT 120)
+set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe
+                      k_s_gemv_parity t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
+set_tests_properties(k_s_gemv_bench PROPERTIES TIMEOUT 300)

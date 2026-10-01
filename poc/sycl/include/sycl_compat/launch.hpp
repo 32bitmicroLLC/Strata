@@ -5,11 +5,12 @@
 //   256 EU, max work-group 1024, sub-group sizes 16/32, 128 KiB shared
 //   memory per work-group. Pick work-group sizes as powers of two <= 1024.
 //
-// Kernels that need shared memory do NOT use this helper: they define a
-// kernel struct with a `sycl::local_accessor<T, 1>` member and launch it
-// directly -- `q.parallel_for(sycl::nd_range<1>(items, work_group), kernel_obj)`.
-// (That pattern first appears in the T3 router port; it is deliberately not
-// abstracted here.)
+// Kernels that need shared memory do NOT use this helper: the T3 finding is
+// that the kernel-struct-with-local-accessor-members pattern does not compile
+// on icpx 2026.1 (no host-side local_accessor range constructor). The working
+// pattern is a q.submit handler that constructs the accessors and captures them
+// BY VALUE into a plain kernel lambda:  q.submit([&](sycl::handler& h) { ... }).
+// See poc/sycl/kernels/router_top10.cpp and plans/sycl-phase-a-report.md §T3.
 #include <sycl/sycl.hpp>
 
 #include <utility>

@@ -313,3 +313,98 @@ experts, k=10, seed 2024):
 | `t3_sg_probe` | handler local accessors + local-memory tree pattern |
 | `k_router_top10_parity` | the MoE router: ids exact, weights ≤ 1e-5, clamp asserted unreachable |
 | `t0_dev0` / `t0_bw_probe` / `t0_bw_gate` | environment + bandwidth gate |
+
+---
+
+## T4 — `s_gemv` port + driver — **PASS**
+
+### Parity result (`k_s_gemv_parity --selftest`, Arc Battlemage G31)
+
+| Case | rows | over tol (1e-4) | worst rel | notes |
+|---|---|---|---|---|
+| S2/Q2_0 | 128 | 0 | 0.000e+00 | bit-exact (bias -1, fp16 scales) |
+| S4/Q4_0 | 128 | 0 | 6.634e-07 | |
+| S4/IQ4_NL | 128 | 0 | 9.278e-06 | table codebook, fp16 scales |
+| S8/Q8_0 | 128 | 0 | 9.649e-06 | |
+| S4/Q4_K | 128 | 0 | 2.814e-07 rel-to-terms | rel-to-result 1.350e-06; cond up to 2.775e+07 |
+
+**No form deferred** — the naive kernel's single template over {2,4,8}-bit widths
+plus the runtime `has_offset` flag and the 16-entry `kIq4Nl` local-memory table
+covers all four fixture forms and the Q4_K case; nothing in scope needed
+machinery the S2 path lacked. The Q4_K worst error matches the CUDA test's own
+recorded figure (2.8e-07 rel-to-terms) essentially exactly.
+
+The mirrored self-consistency diagnostic prints
+`CPU planes vs CPU raw block: max |diff| = 4.883e-04` (the two CPU reference
+decode paths differ by a few fp32 ulps). It is **host-only** code, verbatim-
+mirrored, cannot depend on the SYCL port, and does not gate the verdict — the
+CUDA test prints the same thing. Recorded here so nobody reads it as a port
+defect.
+
+### Bench (naive kernel only — Phase B variants deferred)
+
+```
+s2_gemv bench  [2560 x 640]  200 iters
+  ms per gemv: min 0.3592  median 0.3614  mean 0.4167
+  min -> 4.6 G weights/s, 1.3 GiB/s of S2 streamed
+s2_gemv bench  [640 x 2560]  200 iters
+  ms per gemv: min 0.0969  median 0.0981  mean 0.0983
+  min -> 16.9 G weights/s, 4.9 GiB/s of S2 streamed
+```
+
+First Arc numbers for the engine's GEMV path. The one-thread-per-row naive
+kernel streams 1.3–4.9 GiB/s of S2 — well under a percent of the measured
+D2D read bandwidth (590 GB/s, T0), as expected: `[2560 x 640]` gives only
+5 work-groups of 128 threads (640 rows / 128), and each thread accumulates
+its 2560 elements serially. This is exactly the gap the Phase B
+`s_gemv_split` / quads / fast variants exist to close (the CUDA test's own
+sweep targets ~184 GB/s-class throughput on the split kernel); the naive
+kernel is a parity instrument here, not a performance claim. No CUDA
+comparison number exists in this checkout (no LEDGER.md, no
+docs/benchmarks/) — these are the baseline Arc figures Phase B will
+optimise against.
+
+### Mutation tests (both caught, both by design)
+
+| Mutation | Expected | Observed |
+|---|---|---|
+| drop `+ b` (the weight offset) | Q4_K fails, 4 no-offset forms green | Q4_K 128/128 over tol (1.100 rel-to-terms), other 4 green, exit 1 |
+| invert bias sign in `decode_tbl` | S2/S4/Q4_0/S8 fail, IQ4_NL green | 384 rows over tol in the 3 bias forms, IQ4_NL green, Q4_K green (its offset comes from the `off` array, bias = 0), exit 1 |
+
+Restored → full suite green again.
+
+### Findings
+
+1. **icpx 2026.1 has no `sycl::fp16`.** The draft-stage name is absent; the
+   SYCL 2020 16-bit IEEE binary16 type is `sycl::half` in this toolchain.
+   `t4_fp16_probe` validates `sycl::half → float` widening against the host
+   `strata::fp16_to_fp32` on the driver's 15 kScales patterns plus 9 edge
+   patterns (subnormals, max, zero): **24/24 bit-exact**. The kernel uses
+   `sycl::half`.
+2. **`sycl::local_accessor` has no `.data()`** in DPC++ 2026.1 (no member
+   found; `operator[]` yes). `&s_iq4nl[0]` is the working pointer idiom.
+3. **The `s_iq4nl` table stays on the barrier-before-return pattern** (T2/T3
+   finding): padded work-items past `n_out` fill the table and reach the
+   barrier; an early return before it would strand peers.
+
+### Plan deviations (implemented reality)
+
+- **Block count:** 10 kernel blocks + 33 driver + 1 probe = 44 new blocks;
+  82 total in the tree, all checker-green.
+- **Bench sweep:** the CUDA test's split/quads/fast sweep (lines 356–464) is
+  Phase B — not mirrored; the timing harness, fixed data, and print/projection
+  lines are verbatim.
+- **`test_q4k` takes `ctx&`** (SYCL queues are explicit; the CUDA test's
+  implicit context drops) and the vacuous-`exit(1)` is kept (it is a test,
+  not a library).
+- **Effort:** ~1 day against the 1–2 week envelope — the T2/T3 pipeline
+  (mirror discipline, checker, launch padding, ctx) was already built.
+
+### Standing regressions (ctest)
+
+| Test | What it guards |
+|---|---|
+| `t4_fp16_probe` | `sycl::half → float` bit-exact vs the host fp16 widening |
+| `k_s_gemv_parity` | all 4 S-forms + Q4_K at 1e-4 (incl. the sum|term|-conditioned metric) |
+| `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
+| (all T0–T3 entries above still run) | |
