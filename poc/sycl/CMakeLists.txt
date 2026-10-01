@@ -68,12 +68,23 @@ add_library(k_dequant_s2 STATIC kernels/dequant_s2.cpp)
 add_executable(k_dequant_s2_parity drivers/dequant_s2_parity.cpp)
 target_link_libraries(k_dequant_s2_parity PRIVATE k_dequant_s2)
 
+# T3: the probe that gates the router_top10 port design (found: icpx 2026.1 has
+# no subgroup shuffle/reduce API -> handler local accessors + local-memory trees).
+add_executable(t3_sg_probe t3/sg_probe.cpp)
+
+# T3: the first shared-memory kernel (plans/sycl-phase-a-t3.md).
+add_library(k_router_top10 STATIC kernels/router_top10.cpp)
+add_executable(k_router_top10_parity drivers/router_top10_parity.cpp)
+target_link_libraries(k_router_top10_parity PRIVATE k_router_top10)
+
 add_executable(t0_dev0        t0/dev0.cpp)
 add_executable(t0_bw_probe    t0/bw_probe.cpp)
 add_executable(t0_bw_spike    t0/bw_spike.cpp)
 
 add_test(NAME smoke_parity COMMAND smoke_parity)
 add_test(NAME k_dequant_s2_parity COMMAND k_dequant_s2_parity --selftest)
+add_test(NAME t3_sg_probe   COMMAND t3_sg_probe)
+add_test(NAME k_router_top10_parity COMMAND k_router_top10_parity --selftest)
 add_test(NAME t0_dev0      COMMAND t0_dev0)
 add_test(NAME t0_bw_probe  COMMAND t0_bw_probe)
 add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gate passes
@@ -82,7 +93,7 @@ add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gat
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
 # CMAKE_CXX_LINK_OPTIONS does not reach the link line on CMake 4.2, per-target
 # LINK_OPTIONS does.
-foreach(t smoke_parity k_dequant_s2_parity t0_dev0 t0_bw_probe t0_bw_spike)
+foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t0_dev0 t0_bw_probe t0_bw_spike)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -93,4 +104,5 @@ foreach(t smoke_parity k_dequant_s2_parity t0_dev0 t0_bw_probe t0_bw_spike)
   endif()
 endforeach()
 
-set_tests_properties(smoke_parity k_dequant_s2_parity t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
+set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t0_dev0 t0_bw_probe
+                      t0_bw_gate PROPERTIES TIMEOUT 120)
