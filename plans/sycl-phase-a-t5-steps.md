@@ -189,7 +189,7 @@ kernels carry independent tie logic in `fold_block` and their per-thread
 argmax loops, so the flip was extended to all six tie sites (recorded
 in `plans/sycl-phase-a-t5-step-5.md` and report §T5).
 
-## Step 6 — Bench + full regression (est part of 1 d)
+## Step 6 — Bench + full regression (est part of 1 d) — **done**
 
 - **6.1 Bench (§8):** `--bench` mirrors `bench_sampled` (driver 391–434)
   minus CUDA events: fixed N(0,3) logits at 248,320 vocab, T ∈ {1,4,8},
@@ -202,6 +202,15 @@ in `plans/sycl-phase-a-t5-step-5.md` and report §T5).
   `env -u LD_LIBRARY_PATH`.
 
 Done when: the full suite is green and the bench numbers are recorded.
+
+Result: the audit found one real gap — the `k_sampler_bench` ctest entry
+had no `ENVIRONMENT` pin, so it measured whichever path the caller's shell
+selected; it now pins the default (split) path, and every recorded run
+prints `sampled path: split top_k (default)`. Final §8 table (median of
+three runs, ≤ 5 % spread): 165.8/477.0/101.5/311.0/174.0/540.8 us per call
+over (rows, top_k) = (1,20)/(1,64)/(4,20)/(4,64)/(8,20)/(8,64). Full suite
+19/19, `check_mirrors.sh` exit 0 (259 OK). Details in the report §T5
+step-6 section.
 
 ## Step 7 — Report §T5 + commit (est part of 1 d)
 

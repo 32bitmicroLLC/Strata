@@ -131,7 +131,8 @@ set_tests_properties(k_sampler_parity_one_block PROPERTIES
     ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=1" TIMEOUT 300)
 set_tests_properties(k_sampler_parity_old PROPERTIES
     ENVIRONMENT "STRATA_OLD_SAMPLER=1;STRATA_SAMPLER_ONE_BLOCK=0" TIMEOUT 300)
-set_tests_properties(k_sampler_bench PROPERTIES TIMEOUT 300)
+set_tests_properties(k_sampler_bench PROPERTIES
+    ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0" TIMEOUT 300)
 add_test(NAME t0_dev0      COMMAND t0_dev0)
 add_test(NAME t0_bw_probe  COMMAND t0_bw_probe)
 add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gate passes

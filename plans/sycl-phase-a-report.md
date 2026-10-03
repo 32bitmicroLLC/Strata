@@ -409,7 +409,7 @@ Restored → full suite green again.
 | `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
 | (all T0–T3 entries above still run) | |
 
-## T5 — `sampler` port — **in progress** (step 5 of 7 done)
+## T5 — `sampler` port — **in progress** (step 6 of 7 done)
 
 Plan: `plans/sycl-phase-a-t5.md`; step plan: `plans/sycl-phase-a-t5-step-1.md`.
 
@@ -773,3 +773,41 @@ Findings:
 
 Restored state: kernel `git diff` empty, **19/19** under `env -u
 LD_LIBRARY_PATH` (18.25 s), `check_mirrors.sh` exit 0 (259 OK).
+
+### T5 step 6 — bench finalisation + full regression
+
+The bench machinery (mirrored `bench_sampled`, `--bench`, the
+`k_sampler_bench` ctest entry) landed in Step 4; this step finalised the
+numbers and re-proved the suite.
+
+- **Determinism fix:** `k_sampler_bench` pinned only `TIMEOUT 300` — the
+  dispatcher's `sampled_path()` would measure whichever path the caller's
+  shell happened to select. It now pins `ENVIRONMENT
+  "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0"`; all three recorded
+  runs print `sampled path: split top_k (default)` as their first line.
+
+Final §8 table — split path, Arc, 248,320 vocab, N(0,3) logits, top_p
+0.95, temperature 0.7, 3 warm-ups + 50 timed calls, chrono wall-clock
+around submit + wait:
+
+| rows | top_k | us per call (median of 3) | spread |
+|---|---|---|---|
+| 1 | 20 | 165.8 | 165.8–171.2 |
+| 1 | 64 | 477.0 | 469.1–478.7 |
+| 4 | 20 | 101.5 | 101.5–102.0 |
+| 4 | 64 | 311.0 | 310.9–311.2 |
+| 8 | 20 | 174.0 | 173.7–174.8 |
+| 8 | 64 | 540.8 | 540.7–541.3 |
+
+The three runs agree to ≤ 5 %. The Step 4 single-run provisional numbers
+(148.9/420.2/138.4/404.0/216.8/609.5) sit within ~15 % at T = 1 and
+20–27 % at T = 4/8 — wall-clock noise between sessions, no code change
+in between.
+
+Caveats (parent §8): **first Arc sampler figures**; no CUDA comparison
+exists in this checkout — the numbers join T6's ledger. Performance
+information, not a correctness gate; the exact-pick parity contract is
+what Steps 4/5 proved.
+
+Full regression: **19/19** under `env -u LD_LIBRARY_PATH`,
+`check_mirrors.sh` exit 0 (259 OK).
