@@ -117,7 +117,7 @@ Done when: file compiles under `icpx -fsycl`, mirror blocks added,
 Done when: full kernel file compiles, `check_mirrors.sh` green on all §5.1
 blocks (~30).
 
-## Step 4 — Driver (est 1.5 d)
+## Step 4 — Driver (est 1.5 d) — **done**
 
 Create `poc/sycl/drivers/sampler_parity.cpp` mirroring
 `src/kernels/sampler_parity.cpp` per §5.2. Host references are pure C++ —
@@ -155,7 +155,17 @@ mirror them verbatim, never re-derive:
 Done when: `check_mirrors.sh` green on the ~45 driver blocks (~155 total in
 the tree after T5), and all three path ctests run (greenness is Step 5).
 
-## Step 5 — Mutation tests (est part of 1 d)
+Result (implemented reality): the driver landed with 72 mirror blocks
+(the plan's ~45 undercounted the per-split host lines; the tree now holds
+259 OK blocks). All three path-pinned ctests are green, not merely
+running — default/split 2.3 s, one_block 2.7 s, old 5.0 s — and
+`k_sampler_bench` runs (numbers recorded in Step 6). Two recipe bugs
+caught by the compiler, not the checker (both mirrored ranges had
+swallowed a CUDA line: f3's two `check(cudaMemcpy…)` and f17's
+`DeviceRows` ctor) — fixed before first green run. Records: report §T5
+step-4 section.
+
+## Step 5 — Mutation tests (est part of 1 d) — **done**
 
 Three mutations, each targeting a fixture designed to see it;
 `check_mirrors.sh` going red while a mutation is in is expected (as in
@@ -169,6 +179,15 @@ commit.
 | M3 | `apply_penalties`: divide unconditionally | fixture 4A (multiply-rule observable) | red: `A_visible` pick wrong |
 
 Done when: each mutation reds its designed fixture; restore → all green.
+
+Result (implemented reality): all three mutations red their designed
+fixtures on **all three** path-pinned ctest entries, each with the
+checker red exactly on the touched blocks, and the restored suite is
+19/19 with 259 mirror blocks OK. M1 needed more sites than the table
+states: `take_first` alone reds only the split path — the 1,024-thread
+kernels carry independent tie logic in `fold_block` and their per-thread
+argmax loops, so the flip was extended to all six tie sites (recorded
+in `plans/sycl-phase-a-t5-step-5.md` and report §T5).
 
 ## Step 6 — Bench + full regression (est part of 1 d)
 

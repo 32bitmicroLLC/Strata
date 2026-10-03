@@ -409,7 +409,7 @@ Restored → full suite green again.
 | `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
 | (all T0–T3 entries above still run) | |
 
-## T5 — `sampler` port — **in progress** (step 3 of 7 done)
+## T5 — `sampler` port — **in progress** (step 5 of 7 done)
 
 Plan: `plans/sycl-phase-a-t5.md`; step plan: `plans/sycl-phase-a-t5-step-1.md`.
 
@@ -649,3 +649,127 @@ Two honesty notes, recorded rather than smoothed over:
 Full suite: **15/15** under `env -u LD_LIBRARY_PATH` (~8 s); the smoke
 alone is ~0.5 s (the shapes are small; Step 2's "~15 s" figure was from
 the mid-debug era). No GPU incident this step.
+
+### T5 step 4 — parity driver (`poc/sycl/drivers/sampler_parity.cpp`)
+
+The CUDA driver `src/kernels/sampler_parity.cpp` @ 47d6894 ported per the
+block table: the entire host half (reference_pick, reference_cut,
+sampled_reference, sampled_cut, mirror_select/mirror_pick, the host
+Philox, window_of, sampled_k, the summary/exit contract) and every
+fixture's data generation, reference calls, observability asserts, and
+verdict prints are mirrored verbatim — **72 driver blocks** (the plan's
+"~45" undercounted; interleaving host and CUDA lines inside the fixtures
+splits blocks more than the fixture count suggests). Tree total: 259 OK
+blocks, `check_mirrors.sh` exit 0.
+
+Glue decisions, all documented in the driver header:
+- `check(cudaError_t, …)` not mirrored (SYCL throws); alloc/copy/free →
+  `ctx` calls; `cudaMemset(ptr, 0xFF)` → host-fill `-1` + copy (the
+  unwritten-row-unmatchable prefill, comment mirrored too).
+- **Streams:** `cudaStream_t` is a `void*` typedef, so the original's
+  stream declarations and fixture 17's `{nullptr, cs}` loop stay
+  verbatim; both "streams" are the one in-order `ctx.q` — *more*
+  sequential than CUDA's legacy-stream implicit sync, so no assertion
+  weakens. No fixture assertion depends on stream identity (17 checks
+  picks, not stream behaviour).
+- `DeviceRows` keeps its member shape and `sample()` (which still takes
+  the `stream` argument, ignored); `bench_sampled` keeps its data,
+  parameters, iteration counts, and printf format, with CUDA events
+  replaced by a `chrono` wall clock around submit + `wait_and_throw()`.
+- **Fixture 18a (graph capture, CUDA 1240:1260) excluded in writing**
+  (Phase A has no stream capture; the `stream_capturing` dispatcher
+  clause is deferred). 18's compare/make lambdas, the pre-capture host
+  setup, and 18b's row cap (64 rows split / 70 one-block) port in full;
+  the verdict label stays verbatim.
+
+Result — all three path-pinned ctests **green**, not merely running
+(each test's log prints its own path line, verified via `ctest -V`):
+
+| ctest entry | env pin | runtime |
+|---|---|---|
+| `k_sampler_parity` | `STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0` (split, default) | 2.3 s |
+| `k_sampler_parity_one_block` | `STRATA_SAMPLER_ONE_BLOCK=1` | 2.7 s |
+| `k_sampler_parity_old` | `STRATA_OLD_SAMPLER=1` | 5.0 s |
+
+Every fixture matches on every path; the observability asserts all fired
+(the fixtures can see their features, so the matches are not vacuous):
+"order is observable: yes", "one penalties stage (#53): yes" (draw share
+within 4-sigma), "top_p before min_p: yes", "top_k list under ties: 0 of
+1,340 positions differ; 280 sentinel positions", "sampled draws under
+ties: 0 of 1,632 draws differ; 1,057 picks tie with another kept
+token", "fallbacks: graph capture, row cap: 0 of 134 draws differ",
+counter segmentation PASS.
+
+Bench (provisional — Step 6 finalizes the §8 table), split path, Arc:
+
+| n_vocab | rows | top_k | us per call |
+|---|---|---|---|
+| 248,320 | 1 | 20 | 148.9 |
+| 248,320 | 1 | 64 | 420.2 |
+| 248,320 | 4 | 20 | 138.4 |
+| 248,320 | 4 | 64 | 404.0 |
+| 248,320 | 8 | 20 | 216.8 |
+| 248,320 | 8 | 64 | 609.5 |
+
+Findings:
+- **Checker-green ≠ compiles.** The first assembly was mirror-clean
+  (the checker verifies against the source, which is CUDA) but failed to
+  compile: two of my block ranges had swallowed CUDA lines (f3's two
+  `check(cudaMemcpy…)` inside 523:534, and f17's `DeviceRows` ctor inside
+  1132:1193). The compile is part of drift-detection for host-mirrored
+  drivers, not just a build step; both ranges were split and re-verified.
+- The old path is ~2× slower than split in the parity driver (5.0 s vs
+  2.3 s), consistent with the 1,024-thread per-row design vs the block-
+  parallel split — recorded, no action (Phase B decides the default).
+
+Full suite: **19/19** under `env -u LD_LIBRARY_PATH` (~18 s). No GPU
+incident this step.
+
+### T5 step 5 — mutation tests M1–M3
+
+Three kernel mutations, each reverted before the next (`git checkout` on
+the kernel, which was clean at HEAD); the host references and `src/`
+untouched throughout. Every mutation reded its designed fixture on **all
+three** path-pinned ctest entries, with `check_mirrors.sh` red exactly on
+the touched blocks while the mutation was in (expected, per T2–T4
+doctrine):
+
+| # | mutation (as run) | designed victim | observed red | checker red |
+|---|---|---|---|---|
+| M1 | every tie comparison flipped to break ties to the **highest** id — **six** sites: `take_first` (338:338), `fold_block` (148:148), greedy per-thread (142:143), old per-thread (246:250), one_block per-thread (476:477), split_part chains (621:632) | fixtures 16/17/18b | all three entries: 16 = 1,325/1,340 list positions + 1,349/1,632 draws, 18b = 119/134 draws (#13/#14: 2,793 failures; #15: 2,493 — its 16 count is 1,025/1,340); no other fixture reds | the six blocks, exactly |
+| M2 | min_p before top_p (pre-#53 order): inserted `n_pre` pre-cut + the top_p cut run over `n_pre` in **both** serial tails (278:315 in old and one_block) | fixture 10 | all three entries: 91/256 differ, kernel never draws token 2; 91 = the shared-Philox-u arithmetic exactly (differ bands u ∈ [0.444, 0.571) ∪ [0.777, 1)); incidental: fixture 17 reds 2/1,632 on the two forced entries (its min_p = 0.05 configs fire the pre-cut on the serial tails) — the default entry's split tail was not mutated and stays clean | the two 278:315 blocks, exactly |
+| M3 | `apply_penalties`: divide unconditionally (the pre-sign-fix reading) | fixture 4A | all three entries: 2/2 differ ("want 1 got 0"), no incidental reds | the 74:78 block, exactly |
+
+Findings:
+- **M1's site list was wrong in the plan, and the mutation caught it.**
+  The plan (following the parent table's "`take_first`: `oi < bi` → `oi >
+  bi`") assumed one shared helper. Run literally, it reded only the split
+  path — the forced one_block/old entries stayed green — proving the
+  1,024-thread kernels carry independent tie logic in `fold_block` and
+  their per-thread argmax loops (each its own mirror block). Extending
+  the flip to all six tie sites reded every entry on exactly the tie
+  fixtures and nothing else. The parent table's "+ greedy ties" remains
+  fixture-less (no fixture feeds tied logits to the greedy path); the
+  greedy kernel's tie branch is covered structurally, not by a fixture —
+  recorded, not fixed.
+- **M2's red count matches the shared-u arithmetic, not the naive one.**
+  Both sides draw with the same Philox `u`, so the mismatch probability is
+  the measure of the bands where the two CDFs disagree (35 %, ~90 of 256
+  observed 91), not "the reference draws token 2 ~22 % of the time". The
+  later min_p block inside the mutated tails is a proven no-op under the
+  mutation (`n_keep <= n_pre`), as the plan's analysis predicted — no
+  fixture contradicted it.
+- **M3 reds only its designed victim, and that is the right coverage.**
+  The plan allowed incidental reds on other penalty fixtures; none
+  occurred because 4A is the only fixture that puts a *negative history
+  logit inside the candidate set* — 17's negative random history tokens
+  cannot reach a top-20/64 list of N(0,3) logits, and the other penalty
+  fixtures punish positive or unlisted tokens. Written here rather than
+  read as "M3 barely does anything": it does exactly what the multiply-rule
+  observability was built for.
+- One transient incident: the first post-revert ctest run timed out test
+  13 at 300 s; the direct rerun was 2.3 s green and the full suite green.
+  Transient device flakiness (Steps 2/3 precedent), not a code change.
+
+Restored state: kernel `git diff` empty, **19/19** under `env -u
+LD_LIBRARY_PATH` (18.25 s), `check_mirrors.sh` exit 0 (259 OK).
