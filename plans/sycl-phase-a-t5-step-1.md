@@ -9,15 +9,16 @@ All three use `sycl_compat/test_ctx.hpp` (`sc::ctx`), are registered in
 `poc/sycl/CMakeLists.txt` as standalone exes + ctest entries (following the
 T3 `t3_sg_probe` pattern), and are run under `env -u LD_LIBRARY_PATH`.
 
-## Current status (verified on this machine)
+## Current status (all gates resolved — Step 1 complete)
 
 | probe | source | gate | result |
 |---|---|---|---|
 | P1 | `t5/atomic_probe.cpp` | `atomic_ref` fetch_or on a local accessor, 1024 threads | **PASS** — 0 of 256 words differ |
-| P2 | `t5/math_probe.cpp` | device double `exp` / `logf` bit-identical to host | **FAIL** — see below |
+| P2 | `t5/math_probe.cpp` | device double `exp` / `logf` vs host on a structured grid | **documented finding** (1-ulp gaps; not the decision basis — see below) |
+| P2b | `t5/math_fixture_probe.cpp` | the exact fixture tail arguments + cut margins | **GATE PASS** — fallback (a) adopted |
 | P3 | `t5/tree_probe.cpp` | 1024-wide 10-level local-memory tree vs host serial scan (64 trials, ties/NaN/−inf included) | **PASS** — 0 of 64 trials differ |
 
-Consequences already locked in:
+Consequences locked in (carried to report §T5):
 
 - **P1 → the bitmap keeps the CUDA parallel-build structure**
   (`sycl::atomic_ref<unsigned, relaxed, memory_scope_work_group>::fetch_or`
@@ -28,100 +29,102 @@ Consequences already locked in:
   threads, 10 halving barriers, the `(value, index)` total order survives the
   tree against the serial host scan, including deliberate ties, NaNs, and
   −inf sentinels.
+- **P2/P2b → the ported tail uses plain `exp` / `logf`** (fallback (a)); the
+  affected set is documented in report §T5. No hand-rolled double `exp`
+  (1.3.2) and no fp32 `log` rework (1.3.3) is required.
 
-## Remaining work: P2 (double math)
+All four probes are ctest targets (`t5_atomic_probe`, `t5_math_probe`,
+`t5_tree_probe`, `t5_math_fixture_probe`); ctest `-R t5_` is 4/4 green under
+`env -u LD_LIBRARY_PATH`, and `check_mirrors.sh` passes on every
+`math_fixture_probe` mirror block.
 
-P2 as written FAILs both checks:
+## P2 resolution — how it went
+
+P2 as written FAILed its grid checks:
 
 ```
 t5_math_probe: device exp(double) vs host std::exp(double): *** FAIL *** (111570 of 320894 differ)
 t5_math_probe: device logf vs host (float) std::log: *** FAIL *** (6843 of 100000 + 4 fixture values differ)
 ```
 
-Sample: `x -744 mx -744`: device `0.99975588917489733` vs host
-`0.99975588917489722` — last-ulp differences in the double `exp`, on the
-structured grid; and device `logf` differs from host `(float) std::log` on
-~6.8% of the log-uniform grid **and on all four fixture min_p values**
-{0.05, 0.3, 0.5, 0.9}.
+(That "+ 4 fixture values differ" in the old print is a static format string;
+the fixture-value loop actually found **0 of 4** differing — see P2b below.)
 
 The tail only *consumes* these in two ways (sampler.cu 283–316, 396):
-ordered double `sum`/`cum` chains compared against `p.top_p`, and the fp32
-threshold `thresh = sel_logit[0] + logf(p.min_p)` compared against `sel_logit`
-entries. A 1-ulp difference flips a fixture only if some fixture argument is
-within ~1 ulp of its cut. So the resolution order is:
+ordered double `sum`/`cum` chains compared against `p.top_p` / the Philox
+`u`, and the fp32 threshold `thresh = sel_logit[0] + logf(p.min_p)` compared
+against `sel_logit` entries. A 1-ulp difference flips a fixture only if some
+fixture argument sits within a few ulps of its cut.
 
-### 1.3.1 Fixture-argument re-probe (do this first)
+### 1.3.1 Fixture-argument re-probe — DONE
 
-Extend `t5/math_probe.cpp` (or add a fourth small probe) to stop measuring the
-structured grid as the decision basis and instead measure **the exact
-arguments the fixtures actually compute**:
+`t5/math_fixture_probe.cpp` (P2b) rebuilds every sampled-chain fixture of
+`src/kernels/sampler_parity.cpp` data-for-data (same seeds; the generation
+blocks and the `mirror_select`/Philox/`sampled_k`/`window_of` machinery are
+verbatim mirrors, drift-checked by `check_mirrors.sh`), runs each row through
+the host transcription of the kernel tail, and measures exactly:
 
-- Run each fixture's logits through the host-side sampled chain (the
-  `sampled_reference` logic that Step 4 will mirror verbatim — re-derive it
-  minimally here, a few serial lines, not the full driver) to collect the
-  actual per-round argument pairs `(x, mx)` feeding `exp((double) x -
-  (double) mx)`, the fp32 `thresh` values, and the distances from every
-  `sel_logit[i]` to its `thresh` and from every `cum` to `top_p`.
-- Compare device vs host bit-for-bit on exactly those pairs, and print the
-  minimum cut margin per fixture (in ulps of the fp32 logit / fp64 cum).
-- Gate: device == host on every fixture argument, or margins ≫ 1 ulp →
-  adopt fallback (a): document the exact affected set (grid counts above)
-  in the report and proceed to Step 2 with the plain `exp`/`logf`.
+- 10,670 rows (1,340 void — fixture 16's NaN/±inf rows, where no cut fires),
+  130,589 collected double-exp arguments, 4 distinct min_p values;
+- device `exp` vs host `std::exp` on exactly those arguments:
+  **14,443 of 130,589 differ** (all 1 ulp);
+- device `logf` vs host `(float) std::log` on the fixture min_p values:
+  **0 of 4 differ** (bit-identical);
+- minimum cut margins per fixture, worst across all fixtures:
+  top_p **214,748,367 double ulps**, draw **180,290,208 double ulps**,
+  min_p **8,950 fp32 ulps** (fixture 17 is the closest to a cut in every
+  column).
 
-### 1.3.2 Hand-rolled double `exp` (only if 1.3.1 hits a fixture argument)
+Gate (thresholds in the probe header): a 1-ulp exp term shifts each cum by
+≤ ~128 double ulps (≤ 64 terms), and a 1-ulp `thresh` shift flips a survivor
+only within 1 fp32 ulp — the observed margins exceed the gates (1024 double
+/ 8 fp32 ulps) by ~6 orders of magnitude.
 
-Per parent plan §3 fallback (b): a correctly-rounded double `exp` in device
-code for fp32-representable arguments in [−745, 0] — range-reduce by
-`ln 2` into a small interval, double Taylor with enough guard bits — ~100
-lines, first proven inside the probe against the *full* grid before it goes
-into `kernels/sampler.cpp`. Re-run 1.3.1 afterwards; the kernel's tail uses
-this `exp` verbatim-mirrored wherever the CUDA source spells `exp`.
+**Verdict: GATE PASS — fallback (a) adopted.** The ported tail keeps the
+plain `exp` / `logf` (and the mirrored host references keep `std::exp` /
+`std::log`), and the affected set above is the documented finding in report
+§T5. `t5_math_probe` keeps its grid numbers as an informational regression
+record (exit 0); the gate lives in `t5_math_fixture_probe`.
 
-### 1.3.3 The `logf`/min_p threshold
+### 1.3.2 / 1.3.3 — not triggered
 
-Same decision logic, fp32 side: 1 ulp of `thresh` only matters if a fixture
-has a `sel_logit[i]` within ~1 ulp of it (1.3.1 measures exactly this).
-- Margin-safe → document the 1-ulp `logf` divergence (device libm vs host
-  glibc) with the affected set in the report; the mirrored tail keeps
-  `logf(p.min_p)` verbatim.
-- Knife-edge → hand-roll the fp32 log for the four fixture min_p values
-  (table/extended-precision for the fixed constants is far cheaper than a
-  general `log`), or, if no clean fix exists, a **written report finding on
-  that fixture** — never a silent tolerance, per the parent plan.
-
-### 1.3.4 Stop rule
-
-If after 1.3.2/1.3.3 a fixture still sits on a knife edge that no device-side
-change can clear, the honest output is a written finding (parent plan §3
-fallback (c) / risk R1) — that finding goes in report §T5 and does not block
-the other three path runs.
+- No hand-rolled double `exp` needed (no fixture argument near a cut).
+- No fp32 `log` rework needed (all four fixture min_p values bit-identical).
+- No knife-edge fixture → no written finding of the 1.3.4 class.
 
 ## CMake / run
 
-Already wired (verified in `poc/sycl/CMakeLists.txt`): `t5_atomic_probe`,
-`t5_math_probe`, `t5_tree_probe` as exes + ctest, in the `-fsycl`/rpath/UMF
-foreach, TIMEOUT 120.
+Wired in `poc/sycl/CMakeLists.txt`: `t5_atomic_probe`, `t5_math_probe`,
+`t5_tree_probe`, `t5_math_fixture_probe` as exes + ctest, in the
+`-fsycl`/rpath/UMF foreach; TIMEOUT 120 (the fixture probe runs ~1.5 s).
 
 ```
 cd poc/sycl/build && cmake --build . -j
-env -u LD_LIBRARY_PATH ctest -R t5_   # P1, P3 green now; P2 until 1.3.x lands
+env -u LD_LIBRARY_PATH ctest -R t5_   # 4/4 green
 ```
 
 The `--bench`/3-path `k_sampler_parity` ctest entries in CMake reference
 targets that land in Steps 2–4; ctest on `t5_` only is the Step 1 surface.
 
+**Carry-over note for Step 2:** `poc/sycl/kernels/sampler.cpp` (1,020 lines)
+already exists in the tree from an earlier pass but is **not** wired into
+CMake, and its mirror blocks are currently **red** in `check_mirrors.sh`
+(indentation drift from the CUDA source, plus one misspelled `.cuda`
+marker). Step 2 must make those blocks green before the `k_sampler` /
+`k_sampler_parity` targets join ctest.
+
 ## Done when (Step 1 complete)
 
-- [ ] P1, P3 green (done) and their outcomes documented here + carried into
+- [x] P1, P3 green and their outcomes documented here + carried into
       report §T5 (bitmap: `atomic_ref` parallel build; reduction: 1024-wide
       local-memory tree).
-- [ ] 1.3.1 run: fixture-argument agreement + cut margins recorded.
-- [ ] Double-math strategy decided and recorded: plain `exp`/`logf` with the
-      documented affected set (fallback a), or hand-rolled double `exp`
-      (fallback b) proven green on the full grid and fixture arguments.
-- [ ] `min_p` threshold strategy decided per 1.3.3 (documented 1-ulp set,
-      hand-rolled fp32 log, or written finding).
-- [ ] `t5_math_probe` exit 0 (or its FAIL replaced by the documented finding,
-      which is stated in report §T5 before Step 2 starts).
-- [ ] Step 2/3 design inputs fixed: §4.2 tree shape, §4.3 bitmap build
-      (atomic), tail math functions named for the port.
+- [x] 1.3.1 run: fixture-argument agreement + cut margins recorded
+      (14,443/130,589 exp args 1-ulp; margins ≥ 2.1e8 double / 8,950 fp32 ulps).
+- [x] Double-math strategy decided and recorded: plain `exp`/`logf`,
+      affected set documented (fallback a).
+- [x] `min_p` threshold strategy decided: bit-identical on all four fixture
+      values; mirrored tail keeps `logf(p.min_p)` verbatim.
+- [x] `t5_math_probe` exit 0 (its FAIL replaced by the documented finding in
+      report §T5).
+- [x] Step 2/3 design inputs fixed: §4.2 tree shape, §4.3 bitmap build
+      (atomic), tail math functions (plain `exp`/`logf`).

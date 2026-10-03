@@ -408,3 +408,60 @@ Restored → full suite green again.
 | `k_s_gemv_parity` | all 4 S-forms + Q4_K at 1e-4 (incl. the sum|term|-conditioned metric) |
 | `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
 | (all T0–T3 entries above still run) | |
+
+## T5 — `sampler` port — **in progress** (step 1 of 7 done)
+
+Plan: `plans/sycl-phase-a-t5.md`; step plan: `plans/sycl-phase-a-t5-step-1.md`.
+
+### T5 step 1 — toolchain probes (`poc/sycl/t5/`)
+
+**P1 — `atomic_ref` on local memory — PASS.**
+`sycl::atomic_ref<unsigned, relaxed, memory_scope_work_group>::fetch_or` over
+a local accessor, 1024 threads: 0 of 256 words differ from the serial OR.
+**Consequence:** the penalty bitmap keeps the CUDA parallel-build structure;
+no thread-0 serial fallback. (DPC++ 2026.1 requires the explicit
+three-template-argument spelling — see the probe.)
+
+**P2 — device double math on a structured grid — documented finding.**
+Device `exp(double)` vs host `std::exp(double)`: 111,570 of 320,894 grid
+pairs differ by 1 ulp. Device `logf` vs host `(float) std::log`: 6,843 of
+100,000 grid values differ by 1 ulp. Bit-exactness on arbitrary arguments
+does not hold; the grid is not the decision basis (see P2b).
+
+**P2b — fixture-argument probe (`t5_math_fixture_probe`) — GATE PASS.**
+Rebuilds every sampled-chain fixture of `src/kernels/sampler_parity.cpp`
+data-for-data (verbatim, drift-checked), runs each row through the host
+transcription of the kernel tail, and measures the exact tail arguments and
+cut margins: 10,670 rows (1,340 void — fixture 16's NaN/±inf rows),
+130,589 double-exp arguments. Device `exp` differs from host on 14,443 of
+the 130,589 (1 ulp); device `logf` is **bit-identical on all four fixture
+min_p values** {0.05, 0.3, 0.5, 0.9}. Minimum cut margins across all
+fixtures: top_p 214,748,367 double ulps, draw 180,290,208 double ulps,
+min_p 8,950 fp32 ulps — ~6 orders of magnitude beyond the gate thresholds
+(1024 double / 8 fp32 ulps), which bound the worst perturbation a 1-ulp
+exp term or thresh shift can cause.
+**Consequence (fallback (a) of the parent plan):** the ported tail keeps the
+plain `exp` / `logf` and the mirrored host references keep `std::exp` /
+`std::log`; the affected set above is the documented gap. No hand-rolled
+double `exp` (1.3.2), no fp32 `log` rework (1.3.3), no knife-edge finding
+(1.3.4).
+
+**P3 — 1024-wide local-memory reduction tree — PASS.**
+1024 threads, 10 halving barriers, `(value, index)` total order: 0 of 64
+trials differ from the serial host scan, including deliberate ties, NaNs,
+and −inf sentinels. **Consequence:** the §4.2 block-argmax replacement is
+approved at Arc's max work-group.
+
+All four probes are ctest entries; `ctest -R t5_` is 4/4 green under
+`env -u LD_LIBRARY_PATH` (~2 s total).
+
+### Carry-over into step 2
+
+- `poc/sycl/kernels/sampler.cpp` (1,020 lines) already exists in the tree
+  from an earlier pass. It is **not** wired into `poc/sycl/CMakeLists.txt`
+  yet, and its mirror blocks are currently **red** in `check_mirrors.sh`
+  (indentation drift against the CUDA source; one misspelled `sampler.cuda`
+  marker). Step 2 must make those blocks green before `k_sampler` /
+  `k_sampler_parity` join ctest.
+- Tail design inputs are fixed: local-memory tree per P3, `atomic_ref`
+  bitmap per P1, plain `exp`/`logf` per P2b.
