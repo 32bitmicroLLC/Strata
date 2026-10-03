@@ -92,16 +92,14 @@ add_executable(t5_tree_probe   t5/tree_probe.cpp)
 # P2b: the fixture-argument re-probe that decides the double-math fallback
 # (plans/sycl-phase-a-t5-step-1.md §1.3.1).
 add_executable(t5_math_fixture_probe t5/math_fixture_probe.cpp)
-# k_sampler / k_sampler_parity are added here once the sources land (Task 2/3).
-
-# Each ctest pins one kernel path via the environment (the dispatcher reads
-# it at runtime, exactly like the CUDA parity binary).  The driver's
-# --selftest asserts the run took the path its environment requested.
-add_test(NAME k_sampler_parity COMMAND k_sampler_parity --selftest)
-set_tests_properties(k_sampler_parity PROPERTIES ENVIRONMENT "STRATA_SAMPLER_ONE_BLOCK=1")
-add_test(NAME k_sampler_parity_old COMMAND k_sampler_parity --selftest)
-set_tests_properties(k_sampler_parity_old PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=1")
-add_test(NAME k_sampler_bench COMMAND k_sampler_parity --bench)
+# T5: the sampler kernels (plans/sycl-phase-a-t5-step-2.md).  The
+# k_sampler_parity driver executable lands in Step 4; its three path-pinned
+# ctest entries register there too (STRATA_SAMPLER_ONE_BLOCK=1,
+# STRATA_OLD_SAMPLER=1, and --bench - the bench slot already holds its
+# TIMEOUT 300 in the line below).
+add_library(k_sampler STATIC kernels/sampler.cpp)
+add_executable(k_sampler_smoke t5/k_paths_smoke.cpp)
+target_link_libraries(k_sampler_smoke PRIVATE k_sampler)
 add_library(k_s_gemv STATIC kernels/s_gemv.cpp)
 add_executable(k_s_gemv_parity drivers/s_gemv_parity.cpp)
 target_link_libraries(k_s_gemv_parity PRIVATE k_s_gemv)
@@ -121,6 +119,7 @@ add_test(NAME t5_atomic_probe   COMMAND t5_atomic_probe)
 add_test(NAME t5_math_probe     COMMAND t5_math_probe)
 add_test(NAME t5_tree_probe     COMMAND t5_tree_probe)
 add_test(NAME t5_math_fixture_probe COMMAND t5_math_fixture_probe)
+add_test(NAME k_sampler_smoke   COMMAND k_sampler_smoke)
 add_test(NAME t0_dev0      COMMAND t0_dev0)
 add_test(NAME t0_bw_probe  COMMAND t0_bw_probe)
 add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gate passes
@@ -131,7 +130,8 @@ add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gat
 # LINK_OPTIONS does.
 # (k_sampler_parity joins this list once the kernel source lands)
 foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe k_s_gemv_parity
-                    t5_atomic_probe t5_math_probe t5_tree_probe t5_math_fixture_probe t0_dev0 t0_bw_probe t0_bw_spike)
+                    t5_atomic_probe t5_math_probe t5_tree_probe t5_math_fixture_probe k_sampler_smoke
+                    t0_dev0 t0_bw_probe t0_bw_spike)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -143,6 +143,7 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
 endforeach()
 
 set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe
-                      k_s_gemv_parity t5_atomic_probe t5_math_probe t5_tree_probe
+                      k_s_gemv_parity t5_atomic_probe t5_math_probe t5_tree_probe k_sampler_smoke
                       t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
-set_tests_properties(k_s_gemv_bench k_sampler_bench t5_math_fixture_probe PROPERTIES TIMEOUT 300)
+# k_sampler_bench joins this list with its Step 4 ctest registration.
+set_tests_properties(k_s_gemv_bench t5_math_fixture_probe PROPERTIES TIMEOUT 300)
