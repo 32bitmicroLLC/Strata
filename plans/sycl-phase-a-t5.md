@@ -8,6 +8,9 @@ parity driver** (`src/kernels/sampler_parity.cpp`), grounded at HEAD
 correctness content* (issue #53) and where double-precision device math must
 match the host reference bit-for-bit.
 
+Step-by-step execution plan: `plans/sycl-phase-a-t5-steps.md` (each step with
+its done-when criteria and the deferral stop conditions).
+
 Source inventory:
 
 - kernel: `src/kernels/cuda/sampler.cu` (933 lines) — 5 kernels + 3 host
@@ -433,16 +436,20 @@ fits).
   `atomic_ref` outcome, double-math outcome).
 - [ ] Committed as `phase a t5`.
 
-## 12. Effort
+## 12. Steps and effort
 
-| task | work | est |
-|---|---|---|
-| T5.0 probes P1–P3 | 3 small programs + gates | 0.5 d |
-| T5.1 helpers + greedy + old | the verbatim-heavy half of the kernel | 1 d |
-| T5.2 one-block + split stages + dispatcher | the structural half (barrier trees, I2, scratch) | 1 d |
-| T5.3 driver | 18 fixtures, mostly verbatim host code + glue | 1.5 d |
-| T5.4 mutations + bench + report + commit | per §7/§8 | 1 d |
-| **total** | | **~5 d** (parent plan: ~1 week — inside) |
+Steps (full detail and done-when per step in `plans/sycl-phase-a-t5-steps.md`):
+
+| step | task | work | est |
+|---|---|---|---|
+| 1 | T5.0 probes P1–P3 (`poc/sycl/t5/`) | 3 small programs + gates | 0.5 d |
+| 2 | T5.1 helpers + greedy + old | the verbatim-heavy half of the kernel | 1 d |
+| 3 | T5.2 one-block + split stages + dispatcher | the structural half (barrier trees, I2, scratch) | 1 d |
+| 4 | T5.3 driver | 18 fixtures, mostly verbatim host code + glue | 1.5 d |
+| 5 | T5.4a mutations M1–M3 | per §7 | part of 1 d |
+| 6 | T5.4b bench + full regression | per §8 | part of 1 d |
+| 7 | T5.4c report §T5 + commit | per §11 | part of 1 d |
+| **total** | | | **~5 d** (parent plan: ~1 week — inside) |
 
 The parent plan's deferral contingency (§2 of the parent) is expected **not**
 to fire: no local-memory opt-in, no subgroup API, no mapped memory, no graph

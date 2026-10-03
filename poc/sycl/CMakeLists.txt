@@ -82,6 +82,26 @@ target_link_libraries(k_router_top10_parity PRIVATE k_router_top10)
 
 # T4: the flagship S-family GEMV (plans/sycl-phase-a-t4.md).
 add_executable(t4_fp16_probe t4/fp16_probe.cpp)
+
+# T5: the sampler (plans/sycl-phase-a-t5.md).  Three risk probes first
+# (atomic_ref on local memory, device double math vs host, the 1024-thread
+# reduction tree), then the kernel and the parity driver.
+add_executable(t5_atomic_probe t5/atomic_probe.cpp)
+add_executable(t5_math_probe   t5/math_probe.cpp)
+add_executable(t5_tree_probe   t5/tree_probe.cpp)
+# P2b: the fixture-argument re-probe that decides the double-math fallback
+# (plans/sycl-phase-a-t5-step-1.md §1.3.1).
+add_executable(t5_math_fixture_probe t5/math_fixture_probe.cpp)
+# k_sampler / k_sampler_parity are added here once the sources land (Task 2/3).
+
+# Each ctest pins one kernel path via the environment (the dispatcher reads
+# it at runtime, exactly like the CUDA parity binary).  The driver's
+# --selftest asserts the run took the path its environment requested.
+add_test(NAME k_sampler_parity COMMAND k_sampler_parity --selftest)
+set_tests_properties(k_sampler_parity PROPERTIES ENVIRONMENT "STRATA_SAMPLER_ONE_BLOCK=1")
+add_test(NAME k_sampler_parity_old COMMAND k_sampler_parity --selftest)
+set_tests_properties(k_sampler_parity_old PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=1")
+add_test(NAME k_sampler_bench COMMAND k_sampler_parity --bench)
 add_library(k_s_gemv STATIC kernels/s_gemv.cpp)
 add_executable(k_s_gemv_parity drivers/s_gemv_parity.cpp)
 target_link_libraries(k_s_gemv_parity PRIVATE k_s_gemv)
@@ -97,6 +117,10 @@ add_test(NAME k_router_top10_parity COMMAND k_router_top10_parity --selftest)
 add_test(NAME t4_fp16_probe   COMMAND t4_fp16_probe)
 add_test(NAME k_s_gemv_parity COMMAND k_s_gemv_parity --selftest)
 add_test(NAME k_s_gemv_bench  COMMAND k_s_gemv_parity --bench --iters 50)
+add_test(NAME t5_atomic_probe   COMMAND t5_atomic_probe)
+add_test(NAME t5_math_probe     COMMAND t5_math_probe)
+add_test(NAME t5_tree_probe     COMMAND t5_tree_probe)
+add_test(NAME t5_math_fixture_probe COMMAND t5_math_fixture_probe)
 add_test(NAME t0_dev0      COMMAND t0_dev0)
 add_test(NAME t0_bw_probe  COMMAND t0_bw_probe)
 add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gate passes
@@ -105,7 +129,9 @@ add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gat
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
 # CMAKE_CXX_LINK_OPTIONS does not reach the link line on CMake 4.2, per-target
 # LINK_OPTIONS does.
-foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe k_s_gemv_parity t0_dev0 t0_bw_probe t0_bw_spike)
+# (k_sampler_parity joins this list once the kernel source lands)
+foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe k_s_gemv_parity
+                    t5_atomic_probe t5_math_probe t5_tree_probe t5_math_fixture_probe t0_dev0 t0_bw_probe t0_bw_spike)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -117,5 +143,6 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
 endforeach()
 
 set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe
-                      k_s_gemv_parity t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
-set_tests_properties(k_s_gemv_bench PROPERTIES TIMEOUT 300)
+                      k_s_gemv_parity t5_atomic_probe t5_math_probe t5_tree_probe
+                      t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
+set_tests_properties(k_s_gemv_bench k_sampler_bench t5_math_fixture_probe PROPERTIES TIMEOUT 300)
