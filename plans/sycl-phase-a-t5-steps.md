@@ -212,7 +212,7 @@ over (rows, top_k) = (1,20)/(1,64)/(4,20)/(4,64)/(8,20)/(8,64). Full suite
 19/19, `check_mirrors.sh` exit 0 (259 OK). Details in the report §T5
 step-6 section.
 
-## Step 7 — Report §T5 + commit (est part of 1 d)
+## Step 7 — Report §T5 + commit (est part of 1 d) — **done**
 
 - **7.1 Report** (`plans/sycl-phase-a-report.md` §T5): parity table per
   path, bench numbers, and the deviations list:
@@ -227,6 +227,15 @@ step-6 section.
 - **7.3 Commit** as `phase a t5`.
 
 Done when: report updated, checklist satisfied, commit made.
+
+Result: report §T5 gained one auditable deviations subsection — the two
+items missing from it (all-thread one-block tail, per-call scratch)
+verified against `poc/sycl/kernels/sampler.cpp` before writing, plus the
+Phase B deferral note (coupled-draft kernels, `stream_capturing`, slot
+cache). §T5 heading `**done**`; all six parent §11 boxes ticked. Gate
+proof: **19/19** under `env -u LD_LIBRARY_PATH`, `check_mirrors.sh` exit 0
+(259 OK), clean tree. Committed as `phase a t5` (the hash is in
+`git log`, on top of `t5 step 6 complete`).
 
 ## Stop conditions (deferral branch)
 

@@ -425,16 +425,16 @@ fits).
 
 ## 11. Done when
 
-- [ ] P1/P2/P3 probes green (or their fallbacks adopted and documented).
-- [ ] `k_sampler.cpp` (5 kernels + dispatcher + helpers) and
+- [x] P1/P2/P3 probes green (or their fallbacks adopted and documented).
+- [x] `k_sampler.cpp` (5 kernels + dispatcher + helpers) and
   `k_sampler_parity.cpp` written; `check_mirrors.sh` all OK.
-- [ ] ctest: `k_sampler_parity` **×3 paths** + `k_sampler_bench` + probes +
+- [x] ctest: `k_sampler_parity` **×3 paths** + `k_sampler_bench` + probes +
   all T0–T4 regressions green; `env -u LD_LIBRARY_PATH` clean.
-- [ ] Mutations M1–M3 each red on their designed fixture, restore → green.
-- [ ] Report §T5: parity table per path, bench numbers, deviations list
+- [x] Mutations M1–M3 each red on their designed fixture, restore → green.
+- [x] Report §T5: parity table per path, bench numbers, deviations list
   (all-thread one-block tail, per-call scratch, 18a exclusion,
   `atomic_ref` outcome, double-math outcome).
-- [ ] Committed as `phase a t5`.
+- [x] Committed as `phase a t5`.
 
 ## 12. Steps and effort
 

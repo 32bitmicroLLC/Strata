@@ -409,7 +409,7 @@ Restored → full suite green again.
 | `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
 | (all T0–T3 entries above still run) | |
 
-## T5 — `sampler` port — **in progress** (step 6 of 7 done)
+## T5 — `sampler` port — **done**
 
 Plan: `plans/sycl-phase-a-t5.md`; step plan: `plans/sycl-phase-a-t5-step-1.md`.
 
@@ -811,3 +811,44 @@ what Steps 4/5 proved.
 
 Full regression: **19/19** under `env -u LD_LIBRARY_PATH`,
 `check_mirrors.sh` exit 0 (259 OK).
+
+### T5 deviations (parent §11 list)
+
+Parent §11 requires the report to carry the deviations list; one
+auditable place here (verified against `poc/sycl/kernels/sampler.cpp` in
+step 7, not transcribed on faith):
+
+1. **All-thread one-block tail.** CUDA's `submit_one_block` runs the
+   shuffle-based `sampled_tail_warp` on warp 0 only (`if (warp != 0)
+   return;`, 502:503). A SYCL barrier is work-group scope — threads that
+   returned early would strand their peers (the T2/T3 stranded-peer rule,
+   in reverse) — so all 1,024 threads run the tail in the Old kernel's
+   serial shape (the mirrored block is 278:315, *not* the warp tail's
+   368–420 lines, which appear only in the 32-thread `split_merge` tail).
+   Identical `pick`; thread 0 writes. FP64 cost ×32 vs CUDA's one-warp
+   tail — Phase B perf note, not a parity one (kernel glue ~629:634).
+2. **Per-call scratch.** CUDA's per-(device, stream) `split_scratch()`
+   slot cache (789:832, retired-buffer bookkeeping) becomes a per-call
+   `sycl::malloc_device((n_tokens > 16 ? n_tokens : 16) × n_blocks ×
+   kSelMax)` freed in order on the queue after both stages; the
+   allocation *throws* on failure (never returns null) → the same
+   one-block fallback CUDA's failed `cudaMalloc` (null scratch) takes.
+   One documented in-order sync vs the slot cache (dispatcher glue
+   ~1019:1043).
+3. **Fixture 18a (graph capture) excluded in writing** — Phase A has no
+   stream capture; the `stream_capturing` dispatcher clause is deferred to
+   Phase B. Step 4 section.
+4. **`atomic_ref` outcome (P1)** — PASS: work-group-scope
+   `fetch_or`-based local-memory bitmaps, 0/256 words differ. Step 1
+   section.
+5. **Double-math outcome (P2/P2b)** — documented finding (1-ulp device-vs-
+   host `exp` grid gaps, P2 informational) plus the P2b gate PASS with
+   margins ≥ 6 orders of magnitude; no hand-rolled double `exp` needed.
+   Step 1 section.
+
+Phase B deferrals, with reasons (parent §2/§3): the coupled-draft kernels
+(`coupled_stage_kernel`, `coupled_penalize_kernel`, `coupled_merge_kernel`,
+`coupled_draft_sample` — CUDA 670–751) are not needed for the five-kernel
+scope; the `stream_capturing` dispatcher clause has no graph capture in
+Phase A (fixture 18a); the per-(device, stream) scratch slot cache becomes
+the per-call allocation above.
