@@ -9,7 +9,8 @@
 // both differences.
 //
 // STRUCTURE.  Five CUDA kernels become five submit_* functions, each a 1-D
-// strata_launch-shaped launch:
+// launch with an exact `nd_range` item count - always a work-group multiple,
+// so there are no padded items and the CUDA `t >= n_tokens` guards are omitted:
 //   - submit_sample_greedy   work-group 1024, one per token row
 //   - submit_sample_old      work-group 1024, one per token row (the reference kernel)
 //   - submit_sample_one_block work-group 1024, one per token row
@@ -984,7 +985,9 @@ sycl::event submit_sample_tokens(sycl::queue& q, const float* logits, int n_toke
                                 int history_len, const SamplerParams& p, int* out) {
     // glue (replaces CUDA 838:843): the same validation, but a bad argument throws
     // instead of fprintf + exit(1) - a PoC library should not kill the process
-    if (n_tokens <= 0 || n_vocab <= 0) return q.submit([](sycl::handler&) {});
+    if (n_tokens <= 0 || n_vocab <= 0)
+        throw std::runtime_error("submit_sample_tokens: bad shape (n_tokens=" + std::to_string(n_tokens) + ", n_vocab=" +
+                                 std::to_string(n_vocab) + ")");
     if (p.penalty_last_n > 0 && (history == nullptr || history_len <= 0))
         throw std::runtime_error("submit_sample_tokens: penalty_last_n " + std::to_string(p.penalty_last_n) +
                                  " needs a history");
@@ -1019,7 +1022,16 @@ sycl::event submit_sample_tokens(sycl::queue& q, const float* logits, int n_toke
             // same size - sized for 16 rows and 64 entries at least, so a verify window
             // or a wider top_k does not regrow it
             if (sampled_path() == SampledPath::Split && n_blocks <= kSplitMaxBlocks && n_tokens <= kSplitMaxRows)
-                scratch = sycl::malloc_device<int2>((size_t) (n_tokens > 16 ? n_tokens : 16) * n_blocks * kSelMax, q);
+            {
+                try {
+                    scratch = sycl::malloc_device<int2>((size_t) (n_tokens > 16 ? n_tokens : 16) * n_blocks * kSelMax, q);
+                } catch (const std::exception&) {
+                    // glue: sycl::malloc_device throws on failure (never returns null),
+                    // so a failed allocation takes the same one-block fallback that
+                    // CUDA's failed cudaMalloc (null scratch) does
+                    scratch = nullptr;
+                }
+            }
             // SYCL-MIRROR-BEGIN src/kernels/cuda/sampler.cu:869:869 @ bb7e783
         if (scratch != nullptr) {
             // SYCL-MIRROR-END

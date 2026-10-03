@@ -409,7 +409,7 @@ Restored → full suite green again.
 | `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
 | (all T0–T3 entries above still run) | |
 
-## T5 — `sampler` port — **in progress** (step 2 of 7 done)
+## T5 — `sampler` port — **in progress** (step 3 of 7 done)
 
 Plan: `plans/sycl-phase-a-t5.md`; step plan: `plans/sycl-phase-a-t5-step-1.md`.
 
@@ -569,3 +569,83 @@ Environmental note: mid-step the Arc GPU dropped out of the driver once
 for a few minutes, no root available to reset it); it recovered on its
 own and all subsequent runs were clean. Recorded because a future step
 hitting the same mid-build is not a kernel fault.
+
+### T5 step 3 — one-block + split stages + dispatcher verification
+
+All of the Step-3 code had already been written and compiled in Step 2
+(the draft was complete), so this step verified it against the shapes
+the Step 2 smoke never exercised, fixed two glue gaps found in audit,
+and closed the local-memory budget check. No mirrored line changed;
+`check_mirrors.sh` stays exit 0.
+
+**Dispatcher glue fixes (3.4).**
+(a) `sycl::malloc_device` *throws* on failure (never returns null), so the
+draft's `scratch == nullptr` → one-block fallback was unreachable for a
+failed allocation: the exception would have propagated out of
+`submit_sample_tokens`. The alloc is now wrapped in try/catch; a failure
+leaves `scratch == nullptr` and takes the same one-block fallback CUDA's
+failed `cudaMalloc` takes (verified by inspection — the failure cannot be
+forced on this machine).
+(b) Bad-argument behaviour was inconsistent: missing history with
+penalties threw, but `n_tokens <= 0 || n_vocab <= 0` returned an empty
+event while the header says bad arguments throw. Both cases now throw
+`std::runtime_error`, matching the header; scenario E asserts both.
+
+**Launch-range ratification (3.2).** All five submitters use exact
+`nd_range<1>(n_tokens * …, G)` item counts — always a work-group
+multiple — so padded items cannot exist and the CUDA `t >= n_tokens`
+guards are safely omitted. The header's "1-D strata_launch-shaped
+launch" wording was corrected to say so (doc-only).
+
+**Local-memory budget (3.5).** Computed from the shipped accessors:
+
+| kernel | work-group | worst-shape local memory (vocab 248,320) |
+|---|---|---|
+| greedy | 1024 | 31,040 (7,760-word bitmap) + 8,192 (rv/ri) = 39,232 B |
+| old | 1024 | + 512 (sel_ids/sel_logit) = **39,744 B** |
+| one_block | 1024 | **39,744 B** |
+| split_part | 128 | 512 + 2,048 + 1,024 = 3,584 B (vocab-independent) |
+| split_merge | 32 | 32,768 (lists) + 1,296 = 34,060 B (vocab-independent) |
+
+Max consumer 39,744 B ≈ 38.8 KiB (old/one_block at vocab 248,320) — 31 %
+of Arc's 128 KiB work-group cap. The steps file's "~34 KiB" was the
+split_merge consumer; the true max is 39,744 B. **The parent plan's
+deferral trigger does not fire; no local-memory opt-in machinery is
+needed.** Proven at runtime, not just arithmetic: scenario F launches
+the 39-KiB shapes on Arc at vocab 248,320 (a reject would throw at
+enqueue) and its picks match the serial reference.
+
+**Scenario matrix (3.6).** `k_paths_smoke` refactored into six scenarios;
+every path is judged against the host serial reference (k rounds of the
+penalised strict argmax + mirrored tail, host math) — same arbiter as
+Step 2, now parameterised over vocab/history. The parent runs each
+scenario's default path (plus greedy for A, B, F); the forced old /
+one-block paths run in two forked children (old: A, B; one_block: A, C,
+D, F) with fresh runtimes, as in Step 2.
+
+| scenario | shape | what it proved | result |
+|---|---|---|---|
+| A | 64 × 512 | all four paths at the `kSplitMaxRows` boundary (Step 2 shape, unchanged data) | 0/64 differ on every path |
+| B | 16 × 12,288 | multi-block split: `n_blocks = 3`, `(t, b)` item mapping, per-block bitmaps, the multi-list merge in `split_merge` (whose 64-entry input lists come from 3 distinct block lists, so a broken merge — the class of bug that killed `warp_first` — could not hide) | 0/16 differ (default, greedy, old) |
+| C | 100 × 512 | `n_tokens > kSplitMaxRows` → dispatcher one-block fallback | 0/100 differ; default == forced one_block row for row |
+| D | 4 × 262,200 | `n_blocks = 65 > kSplitMaxBlocks` → one-block fallback | 0/4 differ; same double check |
+| E | host-side | `n_tokens = 0` throws; missing history with penalties throws; `temperature = 0` dispatches to the greedy kernel (mirrored 847); degenerate 1 × 4 shape (the reference uses the kernel's `sampled_k` clamp, `k = min(top_k, 64, nv) = 4`) | all four assertions hold |
+| F | 4 × 248,320 | worst local-memory shapes launch on Arc; default = split with `n_blocks = 61`, near the merge's capacity | 0/4 differ (default, greedy, forced one_block) |
+
+Two honesty notes, recorded rather than smoothed over:
+- The C/D "default == forced one_block" cross-check is a *consistency*
+  check, not a branch identifier — both fallback targets are correct, so
+  a broken fallback *condition* would still produce reference-matching
+  picks. The condition's coverage is structural instead: it is mirrored
+  verbatim (862:864) and checked byte-for-byte, and both branches of the
+  surrounding glue are behaviourally exercised (split by A/B/F, fallback
+  by C/D).
+- This plan's table row "F: greedy + one_block (parent)" was wrong as
+  written: one_block cannot be run in-process without the env pin, so F
+  runs default + greedy in the parent and forced one_block in the forked
+  child (which also makes F the scenario that proves the 39,744 B shape
+  at runtime, since the parent's greedy is only 39,232 B).
+
+Full suite: **15/15** under `env -u LD_LIBRARY_PATH` (~8 s); the smoke
+alone is ~0.5 s (the shapes are small; Step 2's "~15 s" figure was from
+the mid-debug era). No GPU incident this step.

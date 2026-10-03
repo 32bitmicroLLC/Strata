@@ -143,7 +143,7 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
 endforeach()
 
 set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe
-                      k_s_gemv_parity t5_atomic_probe t5_math_probe t5_tree_probe k_sampler_smoke
+                      k_s_gemv_parity t5_atomic_probe t5_math_probe t5_tree_probe
                       t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
 # k_sampler_bench joins this list with its Step 4 ctest registration.
-set_tests_properties(k_s_gemv_bench t5_math_fixture_probe PROPERTIES TIMEOUT 300)
+set_tests_properties(k_s_gemv_bench t5_math_fixture_probe k_sampler_smoke PROPERTIES TIMEOUT 300)

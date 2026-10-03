@@ -175,23 +175,28 @@ env -u LD_LIBRARY_PATH ctest -R "k_sampler_smoke" --output-on-failure
 env -u LD_LIBRARY_PATH ctest                # full suite stays green
 ```
 
-## Done when (Step 3 complete)
+## Done when (Step 3 complete) — **all done**
 
-- [ ] Dispatcher glue fixed: scratch-alloc failure falls back to
+- [x] Dispatcher glue fixed: scratch-alloc failure falls back to
       one-block; `n_tokens <= 0 || n_vocab <= 0` throws like the
       missing-history case (header and code agree).
-- [ ] Header wording corrected: exact `nd_range` launches (no padded
+- [x] Header wording corrected: exact `nd_range` launches (no padded
       items), not "strata_launch-shaped".
-- [ ] Local-memory budget table computed (max 39,744 B ≈ 38.8 KiB vs
-      128 KiB) and proven at runtime by a greedy + one_block launch at
-      vocab 248,320.
-- [ ] Scenario matrix green in `k_sampler_smoke`: A (4 paths × 64 rows),
+- [x] Local-memory budget table computed (max 39,744 B ≈ 38.8 KiB vs
+      128 KiB) and proven at runtime — scenario F's default (split, 61
+      blocks) + greedy + forced one_block all launch at vocab 248,320
+      and match the serial reference. (The one-block run needs the env-
+      pinned fork, since the dispatcher can only be forced to one_block
+      via `STRATA_SAMPLER_ONE_BLOCK`; the table row "F: parent only" was
+      wrong in this plan — corrected in the report.)
+- [x] Scenario matrix green in `k_sampler_smoke`: A (4 paths × 64 rows),
       B (multi-block split, `n_blocks = 3`), C (`n_tokens > 64` fallback),
       D (`n_blocks > 64` fallback), E (throws + `temperature = 0` +
-      degenerate), F (worst-shape local memory).
-- [ ] `check_mirrors.sh` still exits 0 (no mirrored line changed).
-- [ ] Full-suite `ctest` green under `env -u LD_LIBRARY_PATH`.
-- [ ] Steps file + report §T5 updated.
+      degenerate), F (worst-shape local memory). Zero differing rows
+      anywhere; three consecutive standalone runs green (~0.5 s each).
+- [x] `check_mirrors.sh` still exits 0 (no mirrored line changed).
+- [x] Full-suite `ctest` green under `env -u LD_LIBRARY_PATH` (15/15).
+- [x] Steps file + report §T5 updated.
 
 ## Out of scope (later steps)
 

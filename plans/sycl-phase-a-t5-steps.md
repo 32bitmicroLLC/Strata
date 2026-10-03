@@ -77,7 +77,7 @@ convention.
 Done when: file compiles under `icpx -fsycl`, mirror blocks added,
 `check_mirrors.sh` green for every block so far.
 
-## Step 3 — Kernel part 2: one-block + split stages + dispatcher (est 1 d)
+## Step 3 — Kernel part 2: one-block + split stages + dispatcher (est 1 d) — **done**
 
 - **3.1 `submit_one_block` (433–504, work-group 1024):** rounds with the
   prev-threshold candidate test (477 verbatim); **documented deviation** —

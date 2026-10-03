@@ -1,23 +1,36 @@
-// poc/sycl/t5/k_paths_smoke.cpp -- T5 step 2 one-shot path smoke
-// (plans/sycl-phase-a-t5-step-2.md §2.5).  NOT fixture parity (that is Step 4's
-// k_sampler_parity): this proves the k_sampler library links, all four paths
-// launch without crashing or deadlocking, the greedy picks equal the host
-// serial argmax with penalties, and each sampled path (split, old, one_block)
-// equals a host serial reference - the k top_k rounds of the penalised argmax
-// plus the mirrored tail (278:315) with host math - row for row.
+// poc/sycl/t5/k_paths_smoke.cpp -- T5 step 3 scenario-matrix smoke
+// (plans/sycl-phase-a-t5-step-3.md §3.6).  NOT fixture parity (that is Step 4's
+// k_sampler_parity): this proves every dispatcher branch and every path the
+// Step 2 smoke left unexercised, each against a host serial reference - the
+// k top_k rounds of the penalised strict argmax (the kernels' (value,
+// lower-index) total order) plus the mirrored tail (278:315) with host math.
 //
-// Fixed data, no fixtures: 64 rows x 512 vocab (64 rows == kSplitMaxRows, so
-// the default split path is actually taken), one 16-token history window per
-// row with heavy repetition to exercise the penalties.
+// Scenario matrix (nv = vocab, nt = rows):
+//   A  64 x   512   all four paths; default = split at the kSplitMaxRows
+//                  boundary (the Step 2 shape, unchanged)
+//   B  16 x 12288   multi-block split: n_blocks = 3, (t,b) item mapping,
+//                  per-block bitmaps, multi-list merge in split_merge
+//   C 100 x   512   n_tokens > kSplitMaxRows -> dispatcher one-block fallback
+//   D   4 x 262200  n_blocks = 65 > kSplitMaxBlocks -> one-block fallback
+//   F   4 x 248320  worst local-memory shapes (7,760-word bitmap at 1,024
+//                  threads) actually launch on Arc; default = split with
+//                  n_blocks = 61, near the merge's capacity
+//   E     host     bad-argument throws (n_tokens = 0, missing history with
+//                  penalties), temperature = 0 dispatching to the greedy
+//                  kernel, degenerate 1 x 4 shape
 //
-// The other two sampled paths run in forked children (setenv + a fresh SYCL
-// runtime each): sampled_path() caches its env read in a function-static, so
-// one process can only take one sampled path.  The fork happens before either
-// parent or child touches the SYCL runtime.
+// The parent runs each scenario's default path (and greedy where noted)
+// in-process; the forced old / one-block paths run in forked children with a
+// fresh SYCL runtime each (sampled_path() caches its env read in a
+// function-static, so one process can take only one sampled path).  The
+// forks happen before the parent touches the SYCL runtime:
+//   STRATA_OLD_SAMPLER child:      scenarios A, B
+//   STRATA_SAMPLER_ONE_BLOCK child: scenarios A, C, D, F
 #include "sycl_compat/test_ctx.hpp"
 
 #include <strata/kernels/sampler.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -41,16 +54,34 @@ sycl::event submit_sample_tokens(sycl::queue& q, const float* logits, int n_toke
 
 namespace {
 
-constexpr int NT = 64;
-constexpr int NV = 512;
-constexpr int HL = 16;
+constexpr int HL = 16;    // history length per row, every scenario
+constexpr int PICK_CAP = 128;  // >= the largest scenario's row count
+
+struct Scenario {
+    const char* name;
+    int nt;
+    int nv;
+    int hl;
+    int seed;
+};
 
 struct Pack {
     int ok;
-    int picks[NT];
+    int nt;
+    int picks[PICK_CAP];
 };
 
-SamplerParams smoke_params() {
+std::vector<Scenario> scenarios() {
+    return {
+        {"A", 64, 512, HL, 12345},     // the Step 2 shape (same data as before)
+        {"B", 16, 12288, HL, 23456},   // n_blocks = 3
+        {"C", 100, 512, HL, 34567},    // nt > kSplitMaxRows
+        {"D", 4, 262200, HL, 45678},   // n_blocks = 65 > kSplitMaxBlocks
+        {"F", 4, 248320, HL, 56789},   // worst local-memory shape; n_blocks = 61
+    };
+}
+
+SamplerParams base_params() {
     SamplerParams p;
     p.top_k = 8;
     p.top_p = 0.9f;
@@ -65,14 +96,15 @@ SamplerParams smoke_params() {
     return p;
 }
 
-void smoke_data(std::vector<float>& l, std::vector<int>& h) {
-    std::mt19937 rng(12345);
+void scenario_data(const Scenario& s, std::vector<float>& l, std::vector<int>& h) {
+    std::mt19937 rng((uint32_t) s.seed);
     std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
-    l.resize((size_t) NT * NV);
+    l.resize((size_t) s.nt * s.nv);
     for (auto& x : l) x = dist(rng);
-    h.resize((size_t) NT * HL);
-    for (int t = 0; t < NT; ++t)
-        for (int i = 0; i < HL; ++i) h[(size_t) t * HL + i] = (t * 5 + i) % 32;
+    const int mod = s.nv < 32 ? s.nv : 32;  // heavy repetition in a small window
+    h.resize((size_t) s.nt * s.hl);
+    for (int t = 0; t < s.nt; ++t)
+        for (int i = 0; i < s.hl; ++i) h[(size_t) t * s.hl + i] = (t * 5 + i) % mod;
 }
 
 int host_count(const int* h, int n, int v) {
@@ -128,22 +160,22 @@ float philox_uniform_h(uint64_t seed, uint64_t counter) {
 // exp differs from the host by 1 ulp on some arguments (t5_math_fixture_probe);
 // the smoke's random data keeps every cut far off the knife edge, so a row
 // disagreeing here is a real kernel bug, not the documented P2 gap.
-int host_sampled(const float* l, const int* hrow, const SamplerParams& p, int t) {
+int host_sampled(const float* l, const int* hrow, const SamplerParams& p, int t, int nv, int hl) {
     int k = (p.top_k > 0 && p.top_k < 64) ? p.top_k : 64;
-    if (k > NV) k = NV;
+    if (k > nv) k = nv;
     std::vector<int> sel_ids((size_t) k);
     std::vector<float> sel_logit((size_t) k);
     for (int i = 0; i < k; ++i) {
         float bv = -INFINITY;
-        int best = NV;
-        for (int v = 0; v < NV; ++v) {
+        int best = nv;
+        for (int v = 0; v < nv; ++v) {
             bool taken = false;
             for (int j = 0; j < i; ++j) if (sel_ids[(size_t) j] == v) { taken = true; break; }
             if (taken) continue;
-            const float s = host_penalize(l[v], host_count(hrow, HL, v), p);
+            const float s = host_penalize(l[v], host_count(hrow, hl, v), p);
             if (s > bv) { bv = s; best = v; }
         }
-        sel_ids[(size_t) i] = (best < NV) ? best : 0;
+        sel_ids[(size_t) i] = (best < nv) ? best : 0;
         sel_logit[(size_t) i] = bv;
     }
     int n_keep = k;
@@ -183,41 +215,80 @@ int host_sampled(const float* l, const int* hrow, const SamplerParams& p, int t)
 
 // The serial greedy reference: the penalised argmax, ties to the lower index -
 // the same strict-> plus lower-index tie order the kernel's tournament implements.
-int host_greedy(const float* l, const int* hrow, const SamplerParams& p) {
+int host_greedy(const float* l, const int* hrow, const SamplerParams& p, int nv, int hl) {
     float bv = -INFINITY;
-    int best = NV;
-    for (int v = 0; v < NV; ++v) {
-        const float s = host_penalize(l[v], host_count(hrow, HL, v), p);
+    int best = nv;
+    for (int v = 0; v < nv; ++v) {
+        const float s = host_penalize(l[v], host_count(hrow, hl, v), p);
         if (s > bv) { bv = s; best = v; }
     }
     return best;
 }
 
-void child(const char* env, int write_fd) {
+int run_default(ctx& c, const std::vector<float>& l, const std::vector<int>& h, const Scenario& s, std::vector<int>& picks,
+                const SamplerParams& p) {
+    float* dl = c.device_alloc<float>(l.size());
+    int* dh = c.device_alloc<int>(h.size());
+    int* dout = c.device_alloc<int>((size_t) s.nt);
+    c.q.memcpy(dl, l.data(), l.size() * sizeof(float));
+    c.q.memcpy(dh, h.data(), h.size() * sizeof(int));
+    submit_sample_tokens(c.q, dl, s.nt, s.nv, dh, s.hl, p, dout).wait_and_throw();
+    picks.resize((size_t) s.nt);
+    c.q.memcpy(picks.data(), dout, (size_t) s.nt * sizeof(int));
+    c.wait_and_throw();
+    return 0;
+}
+
+int run_greedy(ctx& c, const std::vector<float>& l, const std::vector<int>& h, const Scenario& s, std::vector<int>& picks) {
+    float* dl = c.device_alloc<float>(l.size());
+    int* dh = c.device_alloc<int>(h.size());
+    int* dout = c.device_alloc<int>((size_t) s.nt);
+    c.q.memcpy(dl, l.data(), l.size() * sizeof(float));
+    c.q.memcpy(dh, h.data(), h.size() * sizeof(int));
+    SamplerParams p = base_params();
+    p.greedy = true;
+    submit_sample_tokens(c.q, dl, s.nt, s.nv, dh, s.hl, p, dout).wait_and_throw();
+    picks.resize((size_t) s.nt);
+    c.q.memcpy(picks.data(), dout, (size_t) s.nt * sizeof(int));
+    c.wait_and_throw();
+    return 0;
+}
+
+// One forced sampled path (old or one_block, via env) over several scenarios.
+void child(const char* env, int write_fd, const std::vector<Scenario>& mine) {
     ::close(write_fd ^ 1);
     ::setenv(env, "1", 1);
-    Pack pack{};
     try {
         ctx c;
-        std::vector<float> lh;
-        std::vector<int> hh;
-        smoke_data(lh, hh);
-        const SamplerParams p = smoke_params();
-        float* dl = c.device_alloc<float>(lh.size());
-        int* dh = c.device_alloc<int>(hh.size());
-        int* dout = c.device_alloc<int>(NT);
-        c.q.memcpy(dl, lh.data(), lh.size() * sizeof(float));
-        c.q.memcpy(dh, hh.data(), hh.size() * sizeof(int));
-        submit_sample_tokens(c.q, dl, NT, NV, dh, HL, p, dout).wait_and_throw();
-        c.q.memcpy(pack.picks, dout, (size_t) NT * sizeof(int));
-        c.wait_and_throw();
-        pack.ok = 1;
+        const SamplerParams p = base_params();
+        for (const Scenario& s : mine) {
+            Pack pack{};
+            pack.nt = s.nt;
+            try {
+                std::vector<float> l;
+                std::vector<int> h;
+                scenario_data(s, l, h);
+                float* dl = c.device_alloc<float>(l.size());
+                int* dh = c.device_alloc<int>(h.size());
+                int* dout = c.device_alloc<int>((size_t) s.nt);
+                c.q.memcpy(dl, l.data(), l.size() * sizeof(float));
+                c.q.memcpy(dh, h.data(), h.size() * sizeof(int));
+                submit_sample_tokens(c.q, dl, s.nt, s.nv, dh, s.hl, p, dout).wait_and_throw();
+                c.q.memcpy(pack.picks, dout, (size_t) s.nt * sizeof(int));
+                c.wait_and_throw();
+                pack.ok = 1;
+                std::printf("k_sampler_smoke %s child (%s): %d rows ok\n", s.name, env, s.nt);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "k_sampler_smoke %s child (%s): %s\n", s.name, env, e.what());
+            }
+            const ssize_t n = ::write(write_fd, &pack, sizeof pack);
+            (void) n;
+        }
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "%s child: %s\n", env, e.what());
+        std::fprintf(stderr, "k_sampler_smoke %s child: %s\n", env, e.what());
     }
-    const ssize_t n = ::write(write_fd, &pack, sizeof pack);
-    (void) n;
     ::close(write_fd);
+    std::fflush(stdout);  // std::_Exit skips the stdio flush
     std::_Exit(0);
 }
 
@@ -234,92 +305,161 @@ bool read_pack(int fd, Pack& pk) {
 }  // namespace
 
 int main() {
-    std::vector<float> lh;
-    std::vector<int> hh;
-    smoke_data(lh, hh);
-    const SamplerParams p = smoke_params();
+    const std::vector<Scenario> sc = scenarios();
+    std::vector<std::vector<float>> L(sc.size());
+    std::vector<std::vector<int>> H(sc.size());
+    for (size_t i = 0; i < sc.size(); ++i) scenario_data(sc[i], L[i], H[i]);
 
     int p_old[2], p_ob[2];
     if (::pipe(p_old) != 0 || ::pipe(p_ob) != 0) { std::perror("pipe"); return 1; }
+    std::vector<Scenario> ob_mine = {sc[0], sc[2], sc[3], sc[4]};  // A, C, D, F
     const pid_t c_old = ::fork();
     if (c_old < 0) { std::perror("fork"); return 1; }
-    if (c_old == 0) child("STRATA_OLD_SAMPLER", p_old[1]);
+    if (c_old == 0) child("STRATA_OLD_SAMPLER", p_old[1], {sc[0], sc[1]});  // A, B
     const pid_t c_ob = ::fork();
     if (c_ob < 0) { std::perror("fork"); return 1; }
-    if (c_ob == 0) child("STRATA_SAMPLER_ONE_BLOCK", p_ob[1]);
+    if (c_ob == 0) child("STRATA_SAMPLER_ONE_BLOCK", p_ob[1], ob_mine);
     ::close(p_old[1]);
     ::close(p_ob[1]);
 
     int fails = 0;
     try {
         ctx c;
-        float* dl = c.device_alloc<float>(lh.size());
-        int* dh = c.device_alloc<int>(hh.size());
-        int* dout = c.device_alloc<int>(NT);
-        c.q.memcpy(dl, lh.data(), lh.size() * sizeof(float));
-        c.q.memcpy(dh, hh.data(), hh.size() * sizeof(int));
 
-        // The default path: the split top_k (n_blocks == 1, NT == kSplitMaxRows).
-        submit_sample_tokens(c.q, dl, NT, NV, dh, HL, p, dout).wait_and_throw();
-        std::vector<int> split((size_t) NT);
-        c.q.memcpy(split.data(), dout, (size_t) NT * sizeof(int));
-        c.wait_and_throw();
+        // E: host-side dispatcher behaviour - the throws happen before any
+        // device work, so they need no data of their own
+        {
+            SamplerParams p = base_params();
+            float* dl = c.device_alloc<float>(1);
+            int* dh = c.device_alloc<int>(1);
+            int* dout = c.device_alloc<int>(1);
+            bool t1 = false, t2 = false;
+            try {
+                submit_sample_tokens(c.q, dl, 0, 512, dh, HL, p, dout);
+            } catch (const std::exception&) {
+                t1 = true;
+            }
+            try {
+                submit_sample_tokens(c.q, dl, 4, 512, nullptr, 0, p, dout);
+            } catch (const std::exception&) {
+                t2 = true;
+            }
+            if (!t1) { std::fprintf(stderr, "k_sampler_smoke E: n_tokens = 0 did not throw\n"); ++fails; }
+            if (!t2) { std::fprintf(stderr, "k_sampler_smoke E: missing history with penalties did not throw\n"); ++fails; }
 
-        // The greedy path (p.greedy short-circuits the sampled paths).
-        SamplerParams pg = p;
-        pg.greedy = true;
-        submit_sample_tokens(c.q, dl, NT, NV, dh, HL, pg, dout).wait_and_throw();
-        std::vector<int> greedy((size_t) NT);
-        c.q.memcpy(greedy.data(), dout, (size_t) NT * sizeof(int));
-        c.wait_and_throw();
+            // temperature = 0 dispatches to the greedy kernel (mirrored 847)
+            Scenario t0{"E3", 16, 512, HL, 67890};
+            std::vector<float> l;
+            std::vector<int> h;
+            scenario_data(t0, l, h);
+            SamplerParams p0 = base_params();
+            p0.temperature = 0.0f;
+            std::vector<int> picks;
+            run_default(c, l, h, t0, picks, p0);
+            int bad = 0;
+            for (int t = 0; t < t0.nt; ++t)
+                if (picks[(size_t) t] != host_greedy(l.data() + (size_t) t * t0.nv, h.data() + (size_t) t * t0.hl, base_params(), t0.nv, t0.hl))
+                    ++bad;
+            if (bad) { std::fprintf(stderr, "k_sampler_smoke E: temperature = 0 (greedy dispatch): %d of %d rows differ\n", bad, t0.nt); ++fails; }
 
-        Pack old_pk{}, ob_pk{};
-        if (!read_pack(p_old[0], old_pk)) std::fprintf(stderr, "k_sampler_smoke: no result from the old-path child\n");
-        if (!read_pack(p_ob[0], ob_pk)) std::fprintf(stderr, "k_sampler_smoke: no result from the one-block child\n");
-
-        // The serial sampled reference, row by row (host math).
-        std::vector<int> ref((size_t) NT);
-        for (int t = 0; t < NT; ++t)
-            ref[(size_t) t] = host_sampled(lh.data() + (size_t) t * NV, hh.data() + (size_t) t * HL, p, t);
-        int st = 0;
-        ::waitpid(c_old, &st, 0);
-        ::waitpid(c_ob, &st, 0);
-
-        // 1) every pick is a valid token index
-        auto valid = [](const std::vector<int>& v) {
-            for (int x : v) if (x < 0 || x >= NV) return false;
-            return true;
-        };
-        // 2) greedy == the host serial argmax with penalties
-        int gbad = 0;
-        for (int t = 0; t < NT; ++t) {
-            const int want = host_greedy(lh.data() + (size_t) t * NV, hh.data() + (size_t) t * HL, p);
-            if (greedy[(size_t) t] != want) ++gbad;
+            // degenerate shape: 1 row x 4 vocab (all paths; the kernel's
+            // sampled_k clamps top_k to the vocab, so the reference must use
+            // the same clamp: k = min(8, 4) = 4)
+            Scenario dg{"E4", 1, 4, HL, 78901};
+            std::vector<float> ld;
+            std::vector<int> hd;
+            scenario_data(dg, ld, hd);
+            std::vector<int> pd;
+            run_default(c, ld, hd, dg, pd, base_params());
+            std::vector<int> gd;
+            run_greedy(c, ld, hd, dg, gd);
+            const int want_s = host_sampled(ld.data(), hd.data(), base_params(), 0, dg.nv, dg.hl);
+            const int want_g = host_greedy(ld.data(), hd.data(), base_params(), dg.nv, dg.hl);
+            if (pd[0] != want_s || pd[0] < 0 || pd[0] >= dg.nv) { std::fprintf(stderr, "k_sampler_smoke E: degenerate sampled pick %d != %d\n", pd[0], want_s); ++fails; }
+            if (gd[0] != want_g) { std::fprintf(stderr, "k_sampler_smoke E: degenerate greedy pick %d != %d\n", gd[0], want_g); ++fails; }
         }
-        // 3) each sampled path matches the serial reference row for row
-        int sbad = 0, obad = 0, oab = 0;
-        for (int t = 0; t < NT; ++t) {
-            if (split[t] != ref[(size_t) t]) ++sbad;
-            if (old_pk.picks[t] != ref[(size_t) t]) ++obad;
-            if (ob_pk.picks[t] != ref[(size_t) t]) ++oab;
-        }
 
-        const bool ok = old_pk.ok && ob_pk.ok && valid(split) && valid(greedy) && gbad == 0 && sbad == 0 && obad == 0 &&
-                        oab == 0;
-        auto pr8 = [](const std::vector<int>& v, const char* n) {
-            std::printf("k_sampler_smoke: %s: ", n);
-            for (int i = 0; i < 8; ++i) std::printf(i < 7 ? "%d " : "%d\n", v[(size_t) i]);
-        };
-        pr8(split, "split");
-        pr8(greedy, "greedy");
-        std::printf("k_sampler_smoke: old: ");
-        for (int i = 0; i < 8; ++i) std::printf(i < 7 ? "%d " : "%d\n", old_pk.picks[i]);
-        std::printf("k_sampler_smoke: oneblock: ");
-        for (int i = 0; i < 8; ++i) std::printf(i < 7 ? "%d " : "%d\n", ob_pk.picks[i]);
-        std::printf("k_sampler_smoke: greedy vs host serial: %d of %d differ; vs serial ref - split: %d, old: %d, one_block: %d\n",
-                    gbad, NT, sbad, obad, oab);
-        std::printf("k_sampler_smoke: %s\n", ok ? "PASS" : "*** FAIL ***");
-        fails = ok ? 0 : 1;
+        // Scenarios A, B, C, D, F: parent default (+ greedy for A, B, F),
+        // children forced old (A, B) / one_block (A, C, D, F)
+        std::vector<Pack> old_pk(2), ob_pk(4);
+        std::vector<int> dflt, grdy;
+        for (size_t i = 0; i < sc.size(); ++i) {
+            const Scenario& s = sc[i];
+            const std::vector<float>& l = L[i];
+            const std::vector<int>& h = H[i];
+            const bool greedy = (s.name[0] == 'A' || s.name[0] == 'B' || s.name[0] == 'F');
+
+            run_default(c, l, h, s, dflt, base_params());
+            std::vector<int> greedy_picks;
+            if (greedy) run_greedy(c, l, h, s, greedy_picks);
+
+            // the serial sampled reference, row by row (host math)
+            std::vector<int> ref((size_t) s.nt);
+            const SamplerParams p = base_params();
+            for (int t = 0; t < s.nt; ++t)
+                ref[(size_t) t] = host_sampled(l.data() + (size_t) t * s.nv, h.data() + (size_t) t * s.hl, p, t, s.nv, s.hl);
+
+            auto valid = [&s](const std::vector<int>& v) {
+                for (int x : v) if (x < 0 || x >= s.nv) return false;
+                return true;
+            };
+            auto neq = [](const std::vector<int>& a, const std::vector<int>& b) {
+                int n = 0;
+                for (size_t t = 0; t < a.size(); ++t) if (a[t] != b[t]) ++n;
+                return n;
+            };
+
+            int bad = 0;
+            if (!valid(dflt)) { std::fprintf(stderr, "k_sampler_smoke %s: default produced an out-of-range pick\n", s.name); ++fails; }
+            bad += neq(dflt, ref);
+            if (bad) { std::fprintf(stderr, "k_sampler_smoke %s: default vs serial ref: %d of %d rows differ\n", s.name, bad, s.nt); ++fails; }
+            if (greedy) {
+                if (!valid(greedy_picks)) { std::fprintf(stderr, "k_sampler_smoke %s: greedy produced an out-of-range pick\n", s.name); ++fails; }
+                int gbad = 0;
+                for (int t = 0; t < s.nt; ++t)
+                    if (greedy_picks[(size_t) t] != host_greedy(l.data() + (size_t) t * s.nv, h.data() + (size_t) t * s.hl, base_params(), s.nv, s.hl))
+                        ++gbad;
+                if (gbad) { std::fprintf(stderr, "k_sampler_smoke %s: greedy vs host serial: %d of %d rows differ\n", s.name, gbad, s.nt); ++fails; }
+            }
+            // child packs, in scenario order: old child A,B; one-block child A,C,D,F
+            if (s.name[0] == 'A' || s.name[0] == 'B') {
+                Pack& pk = old_pk[s.name[0] == 'A' ? 0 : 1];
+                if (!read_pack(p_old[0], pk)) { std::fprintf(stderr, "k_sampler_smoke %s: no result from the old-path child\n", s.name); ++fails; continue; }
+                if (!pk.ok) { std::fprintf(stderr, "k_sampler_smoke %s: old-path child failed\n", s.name); ++fails; }
+                std::vector<int> oldv(pk.picks, pk.picks + pk.nt);
+                if (!valid(oldv)) { std::fprintf(stderr, "k_sampler_smoke %s: old produced an out-of-range pick\n", s.name); ++fails; }
+                int obad = neq(oldv, ref);
+                if (obad) { std::fprintf(stderr, "k_sampler_smoke %s: old vs serial ref: %d of %d rows differ\n", s.name, obad, s.nt); ++fails; }
+            }
+            if (s.name[0] == 'A' || s.name[0] == 'C' || s.name[0] == 'D' || s.name[0] == 'F') {
+                static int ob_i = 0;  // A, C, D, F arrival order
+                Pack& pk = ob_pk[ob_i++];
+                if (!read_pack(p_ob[0], pk)) { std::fprintf(stderr, "k_sampler_smoke %s: no result from the one-block child\n", s.name); ++fails; continue; }
+                if (!pk.ok) { std::fprintf(stderr, "k_sampler_smoke %s: one-block child failed\n", s.name); ++fails; }
+                std::vector<int> obv(pk.picks, pk.picks + pk.nt);
+                if (!valid(obv)) { std::fprintf(stderr, "k_sampler_smoke %s: one_block produced an out-of-range pick\n", s.name); ++fails; }
+                int bad2 = neq(obv, ref);
+                if (bad2) { std::fprintf(stderr, "k_sampler_smoke %s: one_block vs serial ref: %d of %d rows differ\n", s.name, bad2, s.nt); ++fails; }
+                // the fallback scenarios also cross-check default against the
+                // forced one-block picks (consistency, see the step-3 plan: both
+                // branches are correct, so this is not a branch identifier)
+                if (s.name[0] == 'C' || s.name[0] == 'D') {
+                    int cd = neq(dflt, obv);
+                    if (cd) { std::fprintf(stderr, "k_sampler_smoke %s: default vs forced one_block: %d of %d rows differ\n", s.name, cd, s.nt); ++fails; }
+                }
+            }
+            auto pr8 = [](const std::vector<int>& v, const char* n, const char* sn) {
+                const int m = (int) v.size() < 8 ? (int) v.size() : 8;
+                std::printf("k_sampler_smoke %s %s: ", sn, n);
+                for (int i = 0; i < m; ++i) std::printf(i < m - 1 ? "%d " : "%d\n", v[(size_t) i]);
+            };
+            pr8(dflt, "default", s.name);
+            if (greedy) pr8(greedy_picks, "greedy", s.name);
+        }
+        ::waitpid(c_old, nullptr, 0);
+        ::waitpid(c_ob, nullptr, 0);
+
+        std::printf("k_sampler_smoke: %s\n", fails == 0 ? "PASS" : "*** FAIL ***");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "k_sampler_smoke: %s\n", e.what());
         fails = 1;
