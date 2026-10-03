@@ -205,6 +205,11 @@ static inline void warp_first(sycl::nd_item<1> it, float* s_v, int* s_i, int lan
         const float ov = s_v[lane ^ off];
         const int oi = s_i[lane ^ off];
         take_first(bv, bi, ov, oi);
+        // glue: CUDA's shuffle butterfly updates the registers in place; the shared-memory
+        // form must write the updated pair back to this lane's slot so the next stage's
+        // partner reads the running max, not the original value.
+        s_v[lane] = bv;
+        s_i[lane] = bi;
         it.barrier();
     }
 }

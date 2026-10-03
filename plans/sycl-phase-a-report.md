@@ -409,7 +409,7 @@ Restored → full suite green again.
 | `k_s_gemv_bench` | smoke-times the two real expert shapes at 50 iters |
 | (all T0–T3 entries above still run) | |
 
-## T5 — `sampler` port — **in progress** (step 1 of 7 done)
+## T5 — `sampler` port — **in progress** (step 2 of 7 done)
 
 Plan: `plans/sycl-phase-a-t5.md`; step plan: `plans/sycl-phase-a-t5-step-1.md`.
 
@@ -465,3 +465,107 @@ All four probes are ctest entries; `ctest -R t5_` is 4/4 green under
   `k_sampler_parity` join ctest.
 - Tail design inputs are fixed: local-memory tree per P3, `atomic_ref`
   bitmap per P1, plain `exp`/`logf` per P2b.
+
+### T5 step 2 — repair, wire, compile, smoke (`poc/sycl/kernels/sampler.cpp`)
+
+**2.1 Mirror repair — done.** All 75 blocks re-flowed to the source's
+original indentation (router_top10 pattern), the `sampler.cuda` marker
+fixed, all 76 SHA annotations updated `@ 6cabad2` → `@ bb7e783`.
+`check_mirrors.sh` exits 0: 184 OK blocks tree-wide (75 in
+`kernels/sampler.cpp`, 3 in `t5/k_paths_smoke.cpp` — the smoke's mirrored
+penalty/philox blocks are drift-checked too).
+
+**2.2 Header documentation — done.** The P2 bullet now states the P2b gate
+numbers (14,443/130,589 one-ulp exp args; cut margins ≥ 2.1e8 double ulps /
+≥ 1.8e8 double ulps / ≥ 8,950 fp32 ulps; fallback (a) adopted) instead of
+the premature "verified by the fixtures running".
+
+**2.3 CMake — done.** `k_sampler` is a `STATIC` library
+(`kernels/sampler.cpp`), the three `k_sampler_parity*` `add_test` entries
+moved to Step 4, `k_sampler_smoke` added (TIMEOUT 120, in the
+`-fsycl`/rpath/UMF foreach).
+
+**2.4 Compile green — done.** Whole TU compiles under `icpx -fsycl`
+(exit 0). Every fix was in glue, never in a mirrored line:
+
+- launch ranges: the draft's undefined `strata_launch_items(...)` replaced
+  by plain `(size_t) n_tokens * N` item counts in all three per-row
+  kernels; `n_tokens` parameter added to `submit_sample_greedy` /
+  `submit_sample_one_block`;
+- `submit_split_part`: the merge sink's undefined `dst_row` replaced by the
+  direct `cand[(size_t) t * n_blocks * k + b * k + r]` write;
+  `warp_first`/`warp_merge_lists`/`fold_block` now take raw pointers
+  (`.get_pointer()`) so the four 128-thread regions of the split kernel use
+  disjoint 32-slot butterfly regions;
+- mirror `526:538` extended to `526:539` (the mirrored range had dropped
+  CUDA's `for (m…)` loop-closing brace); one redundant glue brace removed
+  in `submit_split_part`, one in the dispatcher;
+- mirror `412:422` split into `412:421` + `423:423` with a glue comment:
+  CUDA's `sampled_tail_warp` is a template parameter there and the SYCL
+  port is not, so that one line is glue-excluded by documentation;
+- three unguarded local-memory broadcast writes in `submit_split_merge`
+  (`s_sum[0]`, `s_cut[0]`) given `if (lane == 0)` guards (data-race fix,
+  glue);
+- dispatcher: `sycl::event` hoisted out of the first if-branch; the empty
+  return became an empty `q.submit`.
+
+Known and accepted: 14 `get_pointer()` deprecation warnings (DPC++
+2026.1); the accessor-based spellings that replace them (`get_multi_ptr`)
+would fight the raw-pointer butterfly design, so the warnings stand.
+
+**The `warp_first` butterfly bug — the step's substantive finding.**
+The shared-memory butterfly transcribed from CUDA's `__shfl_xor` chain
+wrote each lane's `(value, id)` slot once, at entry, then read the
+partner's slot every stage:
+
+```
+s_v[lane] = bv;  s_i[lane] = bi;   it.barrier();
+for (int off = 16; off > 0; off >>= 1) {
+    const float ov = s_v[lane ^ off];  const int oi = s_i[lane ^ off];
+    take_first(bv, bi, ov, oi);
+    it.barrier();                       // <- missing: no write-back
+}
+```
+
+A shuffle butterfly carries the running max in registers, so each stage's
+partner read sees the previous stage's result; the shared-memory form must
+write `s_v[lane] = bv; s_i[lane] = bi;` before each stage's barrier or the
+butterfly degenerates to a per-lane *quadrant* max. The per-lane scans
+were correct — the corruption was invisible in any single-lane dump and
+only showed up as the split path's merged top-k list containing
+duplicated, non-maximum entries (e.g. row 0 of the smoke: `[385, 136, 136,
+356, 356, 160, 240, 33]` where the true top-8 is
+`[511, 364, 239, 52, 385, 344, 133, 73]`). Detection path: the 2.5 smoke
+failed (split 61/64 rows off, old/one_block exact against a host serial
+reference) → per-path standalone runs showed the split family alone was
+wrong → a scratch-dump of `cand` plus a host replica of stage 1 proved the
+corruption was *in* stage 1 → a pre-butterfly per-lane dump in a debug
+build showed correct per-lane chain winners, localising the bug to the
+butterfly → a minimal standalone kernel (128 threads, per-thread `s[32]`,
+2 rounds) reproduced it deterministically. Fix: the two glue write-back
+lines. Note for Step 3 review: `fold_block` (greedy/old/one_block) is the
+*tree* fold with correct per-level write-back — that is why those three
+paths passed while split failed.
+
+**2.5 Smoke — green.** `poc/sycl/t5/k_paths_smoke.cpp`: 64 rows × 512
+vocab (64 == `kSplitMaxRows`, so the default split path is exercised),
+16-token history per row with heavy repetition (penalties on: repeat
+1.25, freq 0.25, present 0.5, `penalty_last_n = 16`), `top_k = 8`,
+`top_p = 0.9`, `temperature = 0.8`, seed 42. The parent runs split +
+greedy in-process; old and one_block run in forked children with fresh
+SYCL runtimes (their env read is cached function-static in
+`sampled_path()`, so one process can take only one sampled path).
+Assertions: every pick is a valid index; greedy equals the host serial
+argmax after penalties (**0/64 rows differ**); each of the three sampled
+paths equals a host serial reference — k rounds of the penalised
+strict-argmax (the kernels' (value, lower-index) total order) plus the
+mirrored tail (278:315) with host math — (**0/64 rows differ on all
+three**). `ctest -R "t5_|k_sampler_smoke"` green; full suite **15/15**
+under `env -u LD_LIBRARY_PATH` (~7 s). The smoke doubles as the
+barrier-deadlock detector the steps file asked for.
+
+Environmental note: mid-step the Arc GPU dropped out of the driver once
+(`UR_RESULT_ERROR_DEVICE_LOST`, `card1` vanished from `/sys/class/drm`
+for a few minutes, no root available to reset it); it recovered on its
+own and all subsequent runs were clean. Recorded because a future step
+hitting the same mid-build is not a kernel fault.

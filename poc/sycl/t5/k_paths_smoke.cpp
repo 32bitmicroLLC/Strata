@@ -2,8 +2,9 @@
 // (plans/sycl-phase-a-t5-step-2.md §2.5).  NOT fixture parity (that is Step 4's
 // k_sampler_parity): this proves the k_sampler library links, all four paths
 // launch without crashing or deadlocking, the greedy picks equal the host
-// serial argmax with penalties, and the three sampled paths agree with each
-// other row for row (they share the tail math, so a disagreement is a bug).
+// serial argmax with penalties, and each sampled path (split, old, one_block)
+// equals a host serial reference - the k top_k rounds of the penalised argmax
+// plus the mirrored tail (278:315) with host math - row for row.
 //
 // Fixed data, no fixtures: 64 rows x 512 vocab (64 rows == kSplitMaxRows, so
 // the default split path is actually taken), one 16-token history window per
@@ -94,7 +95,7 @@ float host_penalize(float logit, int count, const SamplerParams& p) {
     // SYCL-MIRROR-END
 }
 
-uint32_t philox4x32_round_h(uint32_t& c0, uint32_t& c1, uint32_t& c2, uint32_t& c3, uint32_t k0, uint32_t k1) {
+uint32_t philox4x32_round(uint32_t& c0, uint32_t& c1, uint32_t& c2, uint32_t& c3, uint32_t k0, uint32_t k1) {
     // SYCL-MIRROR-BEGIN src/kernels/cuda/sampler.cu:41:50 @ bb7e783
     const uint32_t hi0 = __umulhi(0x9E3779B9u, c0);
     const uint32_t hi1 = __umulhi(0xBB67AE85u, c2);
@@ -114,7 +115,7 @@ float philox_uniform_h(uint64_t seed, uint64_t counter) {
     uint32_t c0 = (uint32_t) counter, c1 = (uint32_t) (counter >> 32);
     uint32_t c2 = (uint32_t) seed, c3 = (uint32_t) (seed >> 32);
     for (int i = 0; i < 10; ++i) {
-        philox4x32_round_h(c0, c1, c2, c3, (uint32_t) i, 0u);
+        philox4x32_round(c0, c1, c2, c3, (uint32_t) i, 0u);
     }
     // 24 bits of mantissa, so the value is uniform in [0,1) with no rounding to 1.0
     return (float) (c0 >> 8) * (1.0f / 16777216.0f);

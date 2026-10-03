@@ -40,7 +40,15 @@ Done when: all three probes green (or fallbacks adopted and documented),
 and the P1/P2 outcomes are noted — they decide bitmap build and double-math
 strategy for Steps 2–3.
 
-## Step 2 — Kernel part 1: shared helpers + greedy + old (est 1 d)
+## Step 2 — Kernel part 1: shared helpers + greedy + old (est 1 d) — **done**
+
+Outcome: `poc/sycl/kernels/sampler.cpp` all five `submit_*` + dispatcher
+compiling green in the `k_sampler` static lib; all 75 mirror blocks green;
+`k_sampler_smoke` ctest green (all four paths vs host serial reference);
+full suite 15/15. One real glue bug found and fixed on the way: the
+`warp_first` shared-memory butterfly was missing its per-stage write-back
+(CUDA's `__shfl_xor` updates registers in place) — it corrupted only the
+split path's top-k lists; see report §T5 step 2.
 
 Create `poc/sycl/kernels/sampler.cpp` (one `submit_*` per CUDA kernel,
 `sycl::event`-returning, no internal sync — the driver owns the wait).

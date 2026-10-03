@@ -1,4 +1,4 @@
-# T5 Step 2 — kernel part 1: shared helpers + `submit_greedy` + `submit_old`
+# T5 Step 2 — kernel part 1: shared helpers + `submit_greedy` + `submit_old` — **done**
 
 Parents: `plans/sycl-phase-a-t5.md` §4 (port design) and
 `plans/sycl-phase-a-t5-steps.md` Step 2 (est. 1 day). Step 1
@@ -166,18 +166,39 @@ registered until Step 4.
 
 ## Done when (Step 2 complete)
 
-- [ ] `k_sampler` static library target exists and compiles green with
+- [x] `k_sampler` static library target exists and compiles green with
       `icpx -fsycl` (whole TU, including the Step 3 kernels).
-- [ ] `check_mirrors.sh` exits 0; all 75 mirror blocks in
+- [x] `check_mirrors.sh` exits 0; all 75 mirror blocks in
       `kernels/sampler.cpp` report `OK`; markers read
       `sampler.cu … @ bb7e783`.
-- [ ] Header deviations match the Step 1 record (P2b gate numbers, not
+- [x] Header deviations match the Step 1 record (P2b gate numbers, not
       "verified by the fixtures running").
-- [ ] `k_sampler_smoke` ctest green: all four paths launch, greedy picks
-      match the host serial argmax, the three sampled paths agree.
-- [ ] CTest suite green under `env -u LD_LIBRARY_PATH` (t5 probes +
+- [x] `k_sampler_smoke` ctest green: all four paths launch, greedy picks
+      match the host serial argmax, the three sampled paths agree (each
+      equals the host serial reference: 0/64 rows differ).
+- [x] CTest suite green under `env -u LD_LIBRARY_PATH` (15/15: t5 probes +
       `k_sampler_smoke` + all T0–T4 entries).
-- [ ] Steps file + report §T5 updated.
+- [x] Steps file + report §T5 updated.
+
+## Outcome
+
+All six work items done. The one substantive finding of the step is the
+**`warp_first` butterfly bug** (glue, not mirror drift): the
+shared-memory butterfly transcribed from CUDA's `__shfl_xor` chain wrote
+each lane's slot **once** at entry. A shuffle butterfly updates the
+registers in place at every stage; the shared-memory form must write the
+running max back to the lane's own slot at every stage, or each lane ends
+with its own quadrant max instead of the warp max. Symptom: the split path
+returned duplicated, non-max top-k lists (old/one_block were correct); the
+2.5 smoke caught it (61/64 rows off), and it was isolated via a host
+serial reference, per-path standalone runs, per-lane dumps, and a minimal
+standalone repro kernel. Fix: two glue lines (`s_v[lane] = bv; s_i[lane] =
+bi;` before each stage's barrier). Full narrative in report §T5.
+
+The smoke's final assertion is stronger than the steps-file minimum:
+each sampled path is compared against a host serial reference (k rounds of
+the penalised argmax + the mirrored tail with host math) rather than only
+pairwise agreement, so a bug shared by all three paths could not hide.
 
 ## Out of scope (later steps)
 
