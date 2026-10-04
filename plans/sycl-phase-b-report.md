@@ -237,4 +237,78 @@ Phase D moves the tree into the main build with
 
 ---
 
+---
+
+## B1 — elementwise / streaming batch (in progress)
+
+Plan: `plans/sycl-phase-b-steps-b1.md`. Steps 2.1–2.3 complete as of this
+writing; 2.4–2.10 pending.
+
+### B1.1 — `rope.cpp` + `native_rope.cpp` + `rope_parity` (steps 2.1–2.2)
+
+- **Mirrored 1:1**: all five rope table-build/validation blocks, the rope
+  rotation kernel body, the native_rope `enabled`/`overlaps` host checks and
+  kernel body, `mrope_tab` init. Driver: all five parity sections (table,
+  rotation, pairing, scaled tables 4a–4g, native-vs-table 5) mirrored verbatim.
+- **Glue**: G1 2-D grid decomposition in `native_rope` (`blk = gid/threads;`\
+  `blockIdx.x = blk % gridX; blockIdx.y = blk / gridX`); G7 `mrope_pos`
+  defined in both kernel TUs (F7); G8 device management + the `cs5` non-null
+  stream marker for `submit_native_rope`'s mirrored null-stream check; `q.memcpy`
+  instead of `cudaMemcpy` (the `q.copy` USM path segfaults in driver
+  1.14.37020 — recorded, T5-known class).
+- **Parity**: all 12 checks green — table bit-exact; rotation agrees (worst
+  1.089e-07, driver's own tolerance); pairing NEOX; scaled tables bit-exact;
+  yarn structure confirmed; native-vs-table (yarn, factor 2) worst
+  8.631e-05; (none) worst 5.619e-05.
+- **Mutations** (T4/T5 protocol, both reverted green after):
+  1. rope: deleted the `n_rot..head_dim` tail copy → **36,864 over 1e-6**
+     (exactly the tail channels) → detected.
+  2. native_rope: swapped the two rotation outputs → **24,452/24,460 over
+     3e-3** (worst 1.953/1.826) → detected.
+
+### B1.2 — `quantize_act.cpp` + `quantize_act_parity` (step 2.3)
+
+- **Mirrored 1:1**: all five kernel bodies (q8_0, q8_0_scaled, dequant_q8_0,
+  q8_K, dequant_q8_K), `nearest_int_dev`, the launch-size computations, the
+  `QK8_0`/`QK_K`/`Q8K_BYTES` constants, and in the driver both reference
+  transcriptions, both run_cases, the tie fixture, the -127 trap, the fp16
+  overflow/subnormal regression table, and `main`.
+- **Glue**: G1 dim3 in each body; G8 validation throws (`std::runtime_error`)
+  and empty-case no-op submissions; `using std::min`/`std::max` for the
+  unqualified `min(127, v)` (CUDA device builtin);
+  **intrinsic-layer fix**: `fmul_rn` in `intrinsics.hpp` now uses a `volatile`
+  store so icpx cannot contract the multiply into the following
+  `+ 12582912.0f` (the CUDA `__fmul_rn` semantics the q8_K tie fixture is
+  built to catch) — a glue-layer change, no mirrored line touched.
+- **Parity, Q8_0: exact.** All 5 distributions × 131,072 elements: blocks
+  byte-exact, round trip bit-exact. This closes the plan's stated knife-edge
+  (device **double** division, line 72): IEEE-exact on Arc, P2b-consistent.
+  The fp16 overflow/subnormal regression block and the tie-discrimination
+  fixture (522,240 ties, 49.8 % discriminating) pass; the -127-vs--128 trap is
+  observable (0.915 % of magnitude, 172,016 bytes differ).
+- **Parity, Q8_K: red by construction — finding F8** (full analysis in the
+  B1 step file; evidence in `b0/b0_divprobe.cpp`, `b0/b0_divprobe2.cpp`,
+  `b0/b0_q8k_audit.cpp`):
+  - host `1.0f/x` (icpx x86, -O0…-O2): **0/4,194,304** off vs exact RNE;
+  - device `1.0f/x` (Arc, same compiler): **1 ulp on 14 %** of operands,
+    identical at -O0/-O1/-O2 and under `-fp-model precise` → a codegen
+    property (reciprocal-style lowering), not an optimization artifact;
+  - Q8_K chain `-127.0f/max; 1.0f/iscale`: **711/2048 blocks (34.7 %) with a
+    differing f32 `d`** (586 ×1 ulp, 125 ×2–4 ulp); **every `qs`, `bsum`, and
+    all Q8_0 bytes exact** — kernel logic fully faithful, residual solely the
+    non-IEEE division.
+  - **Disposition**: `k_quantize_act_parity` runs with ctest `WILL_FAIL TRUE`
+    — a loud, documented expected failure, NOT a silent tolerance. The Q8_0
+    half already passes; the Q8_K byte comparison waits on the Phase C gate
+    decision (fixed icpx, or a driver update with a documented 1-ulp band on
+    `d`/iscale-derived `qs`).
+- **Mutation test** (plan candidate: divide by the fp16-rounded scale instead
+  of `d32`, Q8_0 line 72): applied to the kernel, rebuilt, driver Q8_0 half
+  shows **136,515 failures** (random normal 949 bad bytes; small magnitude
+  129,011 — the tiny `d32` rounds to a subnormal/zero fp16 and every quant
+  flips; exact-.5 boundaries 2,293; one-extreme-per-block 0, as expected); Q8_K
+  half red as in the unmutated baseline (F8, unchanged signature). Reverted via
+  backup copy: Q8_0 back to **0 failures**, Q8_K signature unchanged. Green
+  confirmed.
+
 *(Batches B1–B8 append their sections here as they complete.)*

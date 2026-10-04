@@ -108,7 +108,8 @@ The infrastructure every batch draws on, built and probed once.
   a parity), `verify_kernels` (23 kernels, no parity file at all). B0's
   deliverable is the resolved table (`plans/sycl-phase-b-report.md`
   §B0.1) — it fixes each batch's driver work; ~10–12 dev-days of new
-  driver work land in the batch steps.
+  driver work land in the batch steps (the B1 audit, findings F1/F5,
+  adds ~1.5 d of mini-drivers on top — see the B1 row below).
 - **B0.2 `sycl_compat/intrinsics.hpp`**, populated from the measured
   inventory:
   - Packed bytes: `__byte_perm`, `__vsub4`, `__vcmpne4`, `__vadd4`
@@ -168,7 +169,7 @@ batch is done when all its files are green and recorded.
 
 | batch | files (lines, `__global__`) | hazards | driver coverage | est |
 |---|---|---|---|---|
-| **B1 — elementwise / streaming** | `dequant_bf16` (248,1), `rope` (136,1), `native_rope` (102,1), `elementwise` (325,14), `quantize_act` (313,5), `cvec` (166,1), `native_bf16` (186,2), `native_gr_postops` (115,3), `kv_q8` (127,2) — 1,718 lines, 30 kernels | low: light shuffles (2 in cvec/elementwise), no packed bytes, small smem | `dequant_bf16` ✓, `rope` ✓ (rope_parity), `cvec` ✓, `elementwise` ✓, `quantize_act` ✓, `kv_q8` ✓, `native_rope` ✓ (rope_parity), `native_bf16` ✓ (ple/shared_expert parities), `native_gr_postops` ✓ (gr_parity) — all resolved by the B0 audit | 3–4 d |
+| **B1 — elementwise / streaming** | `dequant_bf16` (248,1) + iq-dequant surface of `iq_kernels.cu` (~230 lines, F4), `rope` (136,1), `native_rope` (102,1), `elementwise` (325,14), `quantize_act` (313,5), `cvec` (166,1), `native_bf16` (186,2), `native_gr_postops` (115,3), `kv_q8` (127,2) — 1,718 lines, 30 kernels | low: light shuffles (2 in cvec/elementwise), no packed bytes, small smem | audit-refined (findings F1–F8 in `plans/sycl-phase-b-steps-b1.md`): `rope`/`native_rope` ✓ (rope_parity), `quantize_act` ✓ (Q8_K byte check red by design under F8 → `WILL_FAIL`), `elementwise` ✓ (7 of 14 entries; F6), `dequant_bf16` → selftest driver (F5), `kv_q8` ✓ q8-only (FP16 section parks in B5, F3), `cvec` ✓ minus fused-gr section (parks in B4, F2); **`native_bf16` and `native_gr_postops` have no direct CUDA driver — two new mini drivers in B1** (F1) | **4–5 d** |
 | **B2 — GEMV / expert families** | `s2_gemv` (63,1), `s2_gemv_fast` (153,1), `s2_gemv_q8` (96,1, 1 dp4a), `s2_gemv_quads` (93,1), `bf16_gemv` (141,3), `shared_expert` (346,9), `s2_expert_grouped` (790,13), `native_mmvq` (1,493,9, 12 packed bytes) — 3,175 lines, 38 kernels | `native_mmvq` is the largest file and the packed-byte second hub; `s2_expert_grouped` is 13 kernels incl. the grouped GEMV; Phase A's T4 naive GEMV (4.6–16.9 G weights/s) is the baseline the `fast`/`quads` variants must beat — the perf headline of the ledger | `s2_gemv` ✓ (+ `s2_gemv_q8` ✓, `s_gemv_q8k` ✓ for the family), `bf16_gemv` ✓, `shared_expert` ✓, `native_mmvq` ✓ (mmvq_multi_parity); `s2_expert_grouped` → **new driver (~1 d)** per the B0 audit | 5–6 d (+1 d driver) |
 | **B3 — KV + quantised weight access** | `kv_q4` (231,4), `kv_stream` (266,4), `iq_kernels` (748,8, 25 dp4a, 28 packed bytes) — 1,245 lines, 16 kernels | **the packed-byte/dp4a risk hub** — B0.2's payoff lands here; heavy quant-format bit twiddling | `kv_q4` ✓, `kv_stream` ✓, `kv_hybrid` ✓, `iq` ✓ | 2–3 d |
 | **B4 — GDN / GR attention family** | `gdn` (248,5), `fused_gdn` (166,3), `native_gdn` (122,1), `native_gdn_preprocess` (199,5), `native_flash_attn` (212,3, **assigned by B0**), `gr` (432,6), `fused_gr` (405,5, 2 dynamic-smem sites), `native_gr_norm` (102,1, moved from B1 by the B0 audit) — 1,886 lines, 29 kernels | shuffle-heavy recurrent attention (the research doc's "attention/GDN" risk); `fused_gr` carries dynamic smem (B0.4); B0.3 primitives exercised at scale | `gdn` ✓, `gr` ✓; `fused_gdn`, `native_gdn`, `native_gdn_preprocess` (1.5–2 d), `native_flash_attn` (1 d), `native_gr_norm` (0.5 d) → **new drivers** per the B0 audit | 4–5 d (+3–3.5 d drivers) |
@@ -234,9 +235,10 @@ Phase A risk table) and recorded, not silently deferred.
       redesign, GEMM replacement, and mapped-staging decisions (shuffle
       cost, smem budgets, dp4a availability).
 
-**Effort:** B0 (2–3 d) + B1–B7 (23–30 d porting **+ 10–12 d of new-driver
-work** — the B0 audit found 13 driver-less files, not 1–2) + B8 (2 d) ≈
-**~37–48 dev-days (8–10 weeks)** for one developer with the Arc machine —
+**Effort:** B0 (2–3 d) + B1–B7 (23–30 d porting **+ ~11.5–13.5 d of
+new-driver work** — the B0 audit found 13 driver-less files, not 1–2, and
+the B1 audit added two mini-drivers, F1) + B8 (2 d) ≈
+**~38–50 dev-days (9–10 weeks)** for one developer with the Arc machine —
 inside the research doc's "several-month project" envelope once Phase C is
 added, consistent with its "mostly mechanical" read of this phase now that
 Phase A's pipeline exists.

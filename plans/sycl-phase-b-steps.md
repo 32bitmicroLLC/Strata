@@ -92,22 +92,46 @@ satisfied); shuffle primitives accepted at ~275 ns/shuffle (decision in
 report §B0.3); `__trap` silent-no-op finding recorded (report §B0.2);
 smem table complete (5 sites); tree layout documented.
 
-## Step 2 — B1: elementwise / streaming batch (est 3–4 d)
+## Step 2 — B1: elementwise / streaming batch (est 4–5 d, per the B1 audit)
+
+Detailed step plan: `plans/sycl-phase-b-steps-b1.md` (written after a full
+per-file audit of the 9 sources and their drivers — findings F1–F7 amend
+this step).
 
 9 files / 1,718 lines / 30 kernels: `dequant_bf16` (248), `rope` (136),
 `native_rope` (102), `elementwise` (325, 14 kernels), `quantize_act` (313),
 `cvec` (166, 2 shfl), `native_bf16` (186), `native_gr_postops` (115),
-`kv_q8` (127). (`native_gr_norm` moved to Step 5 and `native_qsa` to
-Step 6 by the B0 audit.)
+`kv_q8` (127), plus the iq-dequant surface of `iq_kernels.cu` (~230 lines,
+F4). (`native_gr_norm` moved to Step 5 and `native_qsa` to Step 6 by the
+B0 audit.)
 
 Low-risk by the parent's hazard table: light shuffle use (2 sites each in
-`cvec`/`elementwise`), no packed bytes, small smem. Driver coverage is
-fully resolved by the Step 1 table — every file in this batch has an
-existing driver (`dequant_bf16` ✓, `rope` ✓, `cvec` ✓, `elementwise` ✓,
-`quantize_act` ✓, `kv_q8` ✓, `native_rope` ✓, `native_bf16` ✓,
-`native_gr_postops` ✓) — so this step is mirror-only, no new drivers.
+`cvec`/`elementwise`), no packed bytes, small smem. The audit refined the
+driver story (it was not mirror-only after all):
 
-Done when: all 9 files mirror-green, ctest-green, recorded.
+- **F1:** `native_bf16` and `native_gr_postops` have **no direct parity
+driver in the CUDA tree** — they are exercised only through `gr.cu` /
+  `shared_expert.cu` / `ple.cu`, which port in Steps 5/3/7. B1 gets two
+  small dedicated drivers (~1 d) with the new-driver contract headers.
+- **F2/F3:** `cvec_parity`'s fused-gr section depends on B4's
+  `fused_gr.cu`; `kv_q8_parity`'s FP16-pool section depends on B5's
+  `qsa.cu`. Both sections' mirror blocks park in those later step files;
+  B1 mirrors the rest and adds host-transcription checks for the gaps.
+- **F4:** `dequant_bf16.cu` hard-references `iq_kernels.cu` (B3); the iq
+  dequant surface ports in B1 as `poc/sycl/kernels/iq_dequant.cpp` with
+  cross-file mirror pins, and B3's port stops covering those ranges.
+- **F5:** `dequant_bf16_test` needs a model shard the repo lacks; the SYCL
+  mirror adds a `--selftest` mode (synthetic bytes vs the
+  `strata/artifact/dequant.hpp` CPU chain) that ctest runs.
+- **F6:** 6 of `elementwise`'s 14 entries (doorbell ×3, mapped-copy ×3,
+  `add_inplace`) have no driver coverage on CUDA either — they port and
+  compile in B1, gated by no parity test until Phase C. Recorded.
+- **F7:** `mrope_pos` is CUDA-guarded out of `mrope.hpp`; glue defines it
+  in the rope/native_rope TUs.
+
+Done when: per `plans/sycl-phase-b-steps-b1.md` — 10 kernel TUs + 8 ctest
+drivers green, checker tree-wide green, mutation tests red-verified,
+report §B1 written, parked-block amendments landed in Steps 4/5/6 files.
 
 ## Step 3 — B2: GEMV / expert families (est 5–6 d + 1 d driver)
 
@@ -278,9 +302,10 @@ report written with the Phase C handoff section.
 
 ## Total
 
-Step 1 (2–3 d) + Steps 2–8 (23–30 d porting **+ 10–12 d of new-driver
-work** — the B0 audit found 13 driver-less files, not 1–2; the per-step
-driver estimates are annotated above) + Step 9 (2 d) ≈ **~37–48 dev-days
-(8–10 weeks)** — the parent's original 27–36 d envelope re-based by the
-B0 audit, still inside the research doc's "several-month project" once
-Phase C is added.
+Step 1 (2–3 d) + Steps 2–8 (23–30 d porting **+ ~11.5–13.5 d of new-driver
+work** — the B0 audit found 13 driver-less files, not 1–2; the B1 audit
+added two mini-drivers (F1) and a selftest dequant driver (F5); the
+per-step driver estimates are annotated above) + Step 9 (2 d) ≈
+**~38–50 dev-days (9–10 weeks)** — the parent's original 27–36 d envelope
+re-based by the B0 and B1 audits, still inside the research doc's
+"several-month project" once Phase C is added.

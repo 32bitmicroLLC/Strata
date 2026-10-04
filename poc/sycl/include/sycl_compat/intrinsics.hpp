@@ -323,7 +323,13 @@ template <class T> inline T ldg(const T* p) { return *p; }
 // round-to-nearest, so these are identities (kept for the mirrored spellings).
 inline float fadd_rn(float a, float b) { return a + b; }
 inline float fsub_rn(float a, float b) { return a - b; }
-inline float fmul_rn(float a, float b) { return a * b; }
+// CUDA __fmul_rn: ONE rounded multiply.  A plain `a*b` inline can be contracted
+// into a following `+ c` on device as an FMA, which changes the product's
+// rounding exactly where it matters (the quantize_q8_K kernel comment documents
+// the first version differing in 1 of 524,288 elements for this reason; the
+// tie fixture in the driver is designed to catch it).  The volatile store
+// forces the multiply to round to f32 before the value is used.
+inline float fmul_rn(float a, float b) { volatile float m = a * b; return m; }
 inline float fdiv_rn(float a, float b) { return a / b; }
 inline float fmaf_rn(float a, float b, float c) { return std::fmaf(a, b, c); }
 inline double dadd_rn(double a, double b) { return a + b; }
