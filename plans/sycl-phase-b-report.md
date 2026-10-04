@@ -311,4 +311,72 @@ writing; 2.4–2.10 pending.
   backup copy: Q8_0 back to **0 failures**, Q8_K signature unchanged. Green
   confirmed.
 
+### B1.3 — `native_gr_postops.cpp` + `native_gr_postops_parity` (step 2.4)
+
+- **No CUDA parity driver exists for this file (finding F1)**: the dedicated
+  driver was written in new mode with a documented contract (host C++
+  references transcribed from the kernel math; fixtures: random + signed-zero
+  + aliased/non-aliased buffer cases). Mirrored: all three kernel bodies
+  (`down_silu`, `pre_gated<Fused>` ×2, `post`), `sigmoid`, `scale_zero_bias`,
+  `DSV4`/`DSV4_HC_POST` constants, the launch geometry, and the host
+  validation.
+- **Intrinsic-layer fix (G5)**: the Arc device `fmaf` does NOT implement
+  IEEE signed-zero on a zero addend — `fmaf(s, -0.0f, +0.0f)` yields `-0.0f`
+  (the sign of the product) where IEEE requires `+0.0f`; and icpx -O2 folds
+  `x + 0.0f → x` and `std::fma(a, b, 0.0f) → a*b` even through volatile reads,
+  so the host reference cannot use either spelling. `fmaf_rn` in
+  `intrinsics.hpp` now corrects the zero-addend case by bit inspection, and
+  the driver's reference uses a bit-inspecting `fma32_ref()` instead of
+  performing the add. The mirrored kernel line (`__fmaf_rn(scale, x, 0.0f)`)
+  is untouched.
+- **Parity: within documented ULP gates** (no division on these paths, but the
+  64-ulp device-vs-host `expf` gap from the B0 misc probe accumulates over the
+  `hc`-term sums): down_silu ≤128 ulp (measured 2), gate ≤128 ulp (measured
+  8), mixed ≤8192 ulp (measured 160/743), post ≤16384 ulp (measured 5218/7179).
+  Signed-zero fixtures bit-exact after the G5 fix.
+- **Mutation test** (plan candidate: replace `scale_zero_bias` with a plain
+  `__fmul_rn`): both signed-zero fixtures RED (f16 sign-bit flips), revert →
+  GREEN.
+
+### B1.4 — `dequant_bf16.cpp` + `iq_dequant.cpp` + `dequant_bf16_parity` (step 2.5)
+
+- **F4 closure**: `dequant_bf16.cu` hard-references the iq-dequant surface of
+  `iq_kernels.cu`; that closure (cvt, ten `dq_*` device functions,
+  `dq_dispatch`, `dequant_flat_kernel`, `is_iq`/`iq_supported`/
+  `iq_row_bytes`, the two launchers, plus host-decode hooks for the driver)
+  is ported in `iq_dequant.cpp`. The block structs and codebook grids come
+  from `third_party/ggml/ggml-common.h` under its `GGML_COMMON_*_SYCL` macros
+  — plain host `static const` tables, probed reachable from Arc kernels
+  (the CUDA file uses the `*_CUDA` variants; documented glue difference).
+- **Compiler exception (documented, not a code change)**: the CUDA source's
+  `const int8_t s[N] = {(int8_t) …}` brace initializers use C-style casts,
+  a narrowing conversion clang rejects and nvcc accepts (all values fit).
+  `k_dequant_bf16` compiles with `-Wno-c++11-narrowing`; mirrored lines stay
+  byte-verbatim.
+- **Parity: all 16 types bit-exact** (4×1024 synthetic values each; f32, f16
+  and bf16 paths; zero-scale and NaN-scale superblocks in every type):
+  types 2, 6, 8, 11, 12, 13, 14, 20, 23, 42 against the `dequant.hpp` chain
+  (independent; worst relative error 0.00 — no division on these paths, so the
+  F8 gap cannot bite), types 16, 17, 18, 21, 22, 29 against
+  `host_decode_iq_*` (the same mirrored `dq_dispatch` code run on the host).
+- **Reference-coverage gap (recorded, not papered over)**: the chain has no
+  iq2_xxs/iq2_xs/iq2_s/iq3_xxs/iq3_s/iq1_m dequantizers, so the six iq-only
+  types check device launch/memory/indexing against their own transcription,
+  not an independent reference. True parity for them waits on a shard or a
+  chain extension.
+- **NaN-payload platform difference (mutation-test finding)**: f2bf's NaN
+  guard is load-bearing on NVIDIA (a small-payload float NaN rounds to +inf
+  without it) but NOT on Arc: the device's half→float conversion emits a
+  large-payload NaN (0x7FC02000 where the host yields 0x7F802000 for fp16
+  0x7C01) that survives the rounding add as a quiet NaN. Removing the guard
+  is therefore undetectable by any fixture on this machine; the guard stays
+  mirrored verbatim (defensive parity).
+- **Mutation test** (plan candidate: drop Q5_0's high-bit term `xh1`): type 6
+  RED (955 f32 / 965 f16 / 955 bf16 off), revert → GREEN. (The NaN-guard
+  mutation above is the second candidate; it is uncatchable on Arc, hence the
+  bit-level Q5_0 bit instead.)
+- **Port bug caught by the selftest** (before closeout): `dequant_flat_body`
+  initially used the raw global id as `blockIdx.x` (one work-group per
+  superblock); the driver's iq types failed 3814/4096 — fixed, all green.
+
 *(Batches B1–B8 append their sections here as they complete.)*

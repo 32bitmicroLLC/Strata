@@ -331,7 +331,26 @@ inline float fsub_rn(float a, float b) { return a - b; }
 // forces the multiply to round to f32 before the value is used.
 inline float fmul_rn(float a, float b) { volatile float m = a * b; return m; }
 inline float fdiv_rn(float a, float b) { return a / b; }
-inline float fmaf_rn(float a, float b, float c) { return std::fmaf(a, b, c); }
+// CUDA __fmaf_rn: one IEEE-correctly-rounded fma.  GLUE CORRECTION (B1
+// finding, probed in b0/b1_fma_probe.cpp): the Arc device fma with a +0.0
+// addend returns the SIGN OF THE PRODUCT for an exact zero product -
+// fmaf(s, -0.0f, 0.0f) yields -0.0, where IEEE 754 requires the RN of the
+// exact sum, +0.0 (and -0.0 + 0.0 rounds to +0.0).  The correction below
+// covers exactly that case: with a == 0 or b == 0 the exact product IS
+// zero, so no underflowing sum can masquerade as it.  Host std::fmaf is
+// IEEE-exact (probe), so only the device result needs the fix.  The CUDA
+// sources rely on this signed-zero behavior on purpose (the
+// scale_zero_bias comment in native_gr_postops.cu documents it), so this is
+// a written glue correction, not a tolerated gap.
+inline float fmaf_rn(float a, float b, float c) {
+    float r = std::fmaf(a, b, c);
+    uint32_t ur, uc;
+    std::memcpy(&ur, &r, 4);
+    std::memcpy(&uc, &c, 4);
+    if (uc == 0x00000000u && ur == 0x80000000u && (a == 0.0f || b == 0.0f))
+        r = 0.0f;
+    return r;
+}
 inline double dadd_rn(double a, double b) { return a + b; }
 inline double dmul_rn(double a, double b) { return a * b; }
 inline double ddiv_rn(double a, double b) { return a / b; }

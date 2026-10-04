@@ -55,7 +55,8 @@ endforeach()
 # The repo's include/ is on the path so the PoC can reuse the real API headers
 # (SForm/Codebook) and the host dequantizer chain (dequant.hpp) unmodified.
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include
-                    ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/ggml)
 
 enable_testing()
 
@@ -159,6 +160,7 @@ add_test(NAME b0_misc_probe     COMMAND b0_misc_probe)
 add_executable(b0_divprobe b0/b0_divprobe.cpp)
 add_executable(b0_divprobe2 b0/b0_divprobe2.cpp)
 add_executable(b0_q8k_audit b0/b0_q8k_audit.cpp)
+add_executable(b1_fma_probe b0/b1_fma_probe.cpp)
 target_link_libraries(b0_q8k_audit PRIVATE k_quantize_act)
 add_test(NAME b0_shfl_probe     COMMAND b0_shfl_probe)
 add_test(NAME b0_shfl_bench     COMMAND b0_shfl_bench)
@@ -176,6 +178,26 @@ add_executable(k_quantize_act_parity drivers/quantize_act_parity.cpp)
 target_link_libraries(k_quantize_act_parity PRIVATE k_quantize_act)
 add_test(NAME k_quantize_act_parity COMMAND k_quantize_act_parity --selftest)
 
+# B1 step 2.4: the GR post-operations (new dedicated driver, F1).
+add_library(k_native_gr_postops STATIC kernels/native_gr_postops.cpp)
+add_executable(k_native_gr_postops_parity drivers/native_gr_postops_parity.cpp)
+target_link_libraries(k_native_gr_postops_parity PRIVATE k_native_gr_postops)
+add_test(NAME k_native_gr_postops_parity COMMAND k_native_gr_postops_parity --selftest)
+
+# B1 step 2.5: the dequantizers.  k_iq_dequant is the iq-dequant surface of
+# iq_kernels.cu that dequant_bf16.cu hard-references (F4); the driver adds
+# --selftest on top of the CUDA tool's shard mode (F5).
+add_library(k_iq_dequant STATIC kernels/iq_dequant.cpp)
+add_library(k_dequant_bf16 STATIC kernels/dequant_bf16.cpp)
+# The CUDA source's `const int8_t s[N] = {(int8_t) ...}` initializers use
+# C-style casts inside a brace-init-list: a narrowing conversion clang
+# rejects and nvcc accepts (values all fit).  Documented compiler-glue
+# exception -- the mirrored lines stay byte-verbatim.
+target_compile_options(k_dequant_bf16 PRIVATE -Wno-c++11-narrowing)
+add_executable(k_dequant_bf16_parity drivers/dequant_bf16_parity.cpp)
+target_link_libraries(k_dequant_bf16_parity PRIVATE k_dequant_bf16 k_iq_dequant)
+add_test(NAME k_dequant_bf16_parity COMMAND k_dequant_bf16_parity --selftest)
+
 # The DPC++ driver only adds the SYCL runtime libraries when -fsycl is on the
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
 # CMAKE_CXX_LINK_OPTIONS does not reach the link line on CMake 4.2, per-target
@@ -184,7 +206,8 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
                     t5_atomic_probe t5_math_probe t5_tree_probe t5_math_fixture_probe k_sampler_smoke
                     k_sampler_parity t0_dev0 t0_bw_probe t0_bw_spike
                     b0_dp4a_probe b0_byteperm_probe b0_packed4_probe b0_tf32_probe b0_half_probe
-                    b0_misc_probe b0_shfl_probe b0_shfl_bench b0_divprobe b0_divprobe2 b0_q8k_audit k_rope_parity k_quantize_act_parity)
+                    b0_misc_probe b0_shfl_probe b0_shfl_bench b0_divprobe b0_divprobe2 b0_q8k_audit b1_fma_probe
+                    k_rope_parity k_quantize_act_parity k_native_gr_postops_parity k_dequant_bf16_parity)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -204,6 +227,8 @@ set_tests_properties(b0_dp4a_probe b0_byteperm_probe b0_packed4_probe b0_tf32_pr
 set_tests_properties(b0_shfl_bench PROPERTIES TIMEOUT 300)
 set_tests_properties(k_rope_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_quantize_act_parity PROPERTIES TIMEOUT 120)
+set_tests_properties(k_native_gr_postops_parity PROPERTIES TIMEOUT 120)
+set_tests_properties(k_dequant_bf16_parity PROPERTIES TIMEOUT 120)
 # F8 (plans/sycl-phase-b-report.md): icpx 2026.1 emits a NON-IEEE-correctly-rounded
 # float division on Arc (1 ulp, up to ~4 ulp through the Q8_K iscale->d chain), while
 # the host division in the same compiler is IEEE-exact (0/4,194,304 off).  The mirrored

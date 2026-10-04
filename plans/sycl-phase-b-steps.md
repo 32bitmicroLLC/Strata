@@ -133,12 +133,28 @@ Done when: per `plans/sycl-phase-b-steps-b1.md` — 10 kernel TUs + 8 ctest
 drivers green, checker tree-wide green, mutation tests red-verified,
 report §B1 written, parked-block amendments landed in Steps 4/5/6 files.
 
-## Step 3 — B2: GEMV / expert families (est 5–6 d + 1 d driver)
+## Step 3 — B2: GEMV / expert families (est ~7–9 d after the B2 audit)
 
 8 files / 3,175 lines / 38 kernels: `s2_gemv` (63), `s2_gemv_fast` (153),
 `s2_gemv_q8` (96, 1 dp4a), `s2_gemv_quads` (93), `bf16_gemv` (141, 3
 kernels), `shared_expert` (346, 9), `s2_expert_grouped` (790, 13),
-`native_mmvq` (1,493, 9, 12 packed-byte sites).
+`native_mmvq` (1,493, 9, 12 packed-byte sites) — **plus the unowned
+`s_gemv.cu` remainder** (F9: Phase A ported only the naive kernel; the
+q8k/split kernels + 5 host wrappers, ~500 lines / 3 kernels, join B2
+because `shared_expert` and the un-parked bench sweep need them).
+
+B2 audit (executed at plan-writing time; detail in
+`plans/sycl-phase-b-steps-b2.md`): findings F9–F15 — F9 the `s_gemv.cu`
+remainder is unowned and absorbed here; F10 the new `s2_expert_grouped`
+driver is self-contained (its referenced `bench/micro/moe_hit_parity.cu`
+is not in the repo); F11 `native_mmvq`'s iq dispatch (types 16–29) is a
+glue throw until B3; F12 the shared_expert driver's CUDA-graph-capture
+block is excluded (no SYCL stream capture); F13 the `s2_gemv_fast`
+`__constant__` LUT is runtime-filled (USM wrapper, not G4 constexpr);
+F14 four dynamic-smem sites join the local-memory table; F15
+`intrinsics.hpp` gains `__half22float2` + `make_*2`. New glue conventions
+G9–G13 (runtime local range, multi-dim smem proxy, device-resident
+constants, graph-capture exclusion, header additions).
 
 - The **perf headline** of the ledger: Phase A's T4 naive `s_gemv`
   measured 4.6–16.9 G weights/s on the two real expert shapes — the
@@ -302,10 +318,11 @@ report written with the Phase C handoff section.
 
 ## Total
 
-Step 1 (2–3 d) + Steps 2–8 (23–30 d porting **+ ~11.5–13.5 d of new-driver
+Step 1 (2–3 d) + Steps 2–8 (24–31.5 d porting **+ ~11.5–13.5 d of new-driver
 work** — the B0 audit found 13 driver-less files, not 1–2; the B1 audit
-added two mini-drivers (F1) and a selftest dequant driver (F5); the
+added two mini-drivers (F1) and a selftest dequant driver (F5); the B2
+audit absorbed the unowned `s_gemv.cu` remainder into Step 3 (F9); the
 per-step driver estimates are annotated above) + Step 9 (2 d) ≈
-**~38–50 dev-days (9–10 weeks)** — the parent's original 27–36 d envelope
-re-based by the B0 and B1 audits, still inside the research doc's
-"several-month project" once Phase C is added.
+**~39.5–51.5 dev-days (9–10 weeks)** — the parent's original 27–36 d
+envelope re-based by the B0, B1, and B2 audits, still inside the research
+doc's "several-month project" once Phase C is added.

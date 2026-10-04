@@ -26,8 +26,13 @@ All kernel work lands under `poc/sycl/`; the main tree is never touched.
 
 Status (updated as each step lands): 2.1 ✓, 2.2 ✓, 2.3 ✓ (Q8_0 byte-
 exact; Q8_K red by construction under F8 → `k_quantize_act_parity` runs as a
-documented ctest `WILL_FAIL`; mutation tested, report §B1.2), 2.4–2.10
-pending.
+documented ctest `WILL_FAIL`; mutation tested, report §B1.2),
+2.4 ✓ (`native_gr_postops`; new F1 driver; Arc `fmaf` signed-zero gap fixed in
+`intrinsics.hpp` `fmaf_rn`; ULP gates documented, mutation tested, report
+§B1.3), 2.5 ✓ (`dequant_bf16` + `iq_dequant` F4 closure; new F5 driver with
+--selftest; all 16 types bit-exact; `-Wno-c++11-narrowing` documented
+compiler exception; iq-only types lack a chain reference, report §B1.4),
+2.6–2.10 pending.
 
 Inherited conventions (unchanged from Phase A/B0): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a
