@@ -109,6 +109,18 @@ add_executable(t0_dev0        t0/dev0.cpp)
 add_executable(t0_bw_probe    t0/bw_probe.cpp)
 add_executable(t0_bw_spike    t0/bw_spike.cpp)
 
+# B0 (Phase B, plans/sycl-phase-b-steps-b0.md): the intrinsic layer
+# (poc/sycl/include/sycl_compat/intrinsics.hpp) and its probes. One probe
+# per intrinsic family; b0_shfl_bench measures (not gates) the shuffle cost.
+add_executable(b0_dp4a_probe    b0/b0_dp4a_probe.cpp)
+add_executable(b0_byteperm_probe b0/b0_byteperm_probe.cpp)
+add_executable(b0_packed4_probe  b0/b0_packed4_probe.cpp)
+add_executable(b0_tf32_probe     b0/b0_tf32_probe.cpp)
+add_executable(b0_half_probe     b0/b0_half_probe.cpp)
+add_executable(b0_misc_probe     b0/b0_misc_probe.cpp)
+add_executable(b0_shfl_probe     b0/b0_shfl_probe.cpp)
+add_executable(b0_shfl_bench     b0/b0_shfl_bench.cpp)
+
 add_test(NAME smoke_parity COMMAND smoke_parity)
 add_test(NAME k_dequant_s2_parity COMMAND k_dequant_s2_parity --selftest)
 add_test(NAME t3_sg_probe   COMMAND t3_sg_probe)
@@ -136,6 +148,14 @@ set_tests_properties(k_sampler_bench PROPERTIES
 add_test(NAME t0_dev0      COMMAND t0_dev0)
 add_test(NAME t0_bw_probe  COMMAND t0_bw_probe)
 add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gate passes
+add_test(NAME b0_dp4a_probe    COMMAND b0_dp4a_probe)
+add_test(NAME b0_byteperm_probe COMMAND b0_byteperm_probe)
+add_test(NAME b0_packed4_probe  COMMAND b0_packed4_probe)
+add_test(NAME b0_tf32_probe     COMMAND b0_tf32_probe)
+add_test(NAME b0_half_probe     COMMAND b0_half_probe)
+add_test(NAME b0_misc_probe     COMMAND b0_misc_probe)
+add_test(NAME b0_shfl_probe     COMMAND b0_shfl_probe)
+add_test(NAME b0_shfl_bench     COMMAND b0_shfl_bench)
 
 # The DPC++ driver only adds the SYCL runtime libraries when -fsycl is on the
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
@@ -143,7 +163,9 @@ add_test(NAME t0_bw_gate   COMMAND t0_bw_spike)   # bw_spike exits 0 iff its gat
 # LINK_OPTIONS does.
 foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_fp16_probe k_s_gemv_parity
                     t5_atomic_probe t5_math_probe t5_tree_probe t5_math_fixture_probe k_sampler_smoke
-                    k_sampler_parity t0_dev0 t0_bw_probe t0_bw_spike)
+                    k_sampler_parity t0_dev0 t0_bw_probe t0_bw_spike
+                    b0_dp4a_probe b0_byteperm_probe b0_packed4_probe b0_tf32_probe b0_half_probe
+                    b0_misc_probe b0_shfl_probe b0_shfl_bench)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -158,3 +180,6 @@ set_tests_properties(smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10
                       k_s_gemv_parity t5_atomic_probe t5_math_probe t5_tree_probe
                       t0_dev0 t0_bw_probe t0_bw_gate PROPERTIES TIMEOUT 120)
 set_tests_properties(k_s_gemv_bench t5_math_fixture_probe k_sampler_smoke PROPERTIES TIMEOUT 300)
+set_tests_properties(b0_dp4a_probe b0_byteperm_probe b0_packed4_probe b0_tf32_probe b0_half_probe
+                     b0_misc_probe b0_shfl_probe PROPERTIES TIMEOUT 300)
+set_tests_properties(b0_shfl_bench PROPERTIES TIMEOUT 300)

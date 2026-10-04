@@ -11,11 +11,14 @@ method; this plan does not re-debate it.
 
 **In (device side only):**
 
-- All remaining `src/kernels/cuda/*.cu` ports: **38 files / ~12.4k lines /
-  ~177 `__global__` kernels** (measured: the 42 files total 14,306 lines,
+- All remaining `src/kernels/cuda/*.cu` ports: **40 files / 12,402 lines /
+  ~182 `__global__` kernels** (measured: the 44 files total 14,306 lines,
   191 `__global__`, 186 `__syncthreads`, 98 `__shfl_*`, 36 `cuda_dp4a`
-  mentions; Phase A already ported 4 files / 1,904 lines / 14 kernels —
-  `dequant_s2`, `router_top10`, `s_gemv`, `sampler`).
+  mentions; Phase A already ported 4 files / 1,904 lines —
+  `dequant_s2`, `router_top10`, `s_gemv`, `sampler`). B0's audit
+  (`plans/sycl-phase-b-report.md` §B0.1) corrected the parent's original
+  38/42 counts and assigned two previously unassigned files
+  (`native_flash_attn` → B4, `native_router` → B6).
 - `sycl_compat/intrinsics.hpp` — the device intrinsic layer, populated from
   the inventory below (same pattern as `hip_compat/intrinsics.hpp`).
 - Parity drivers for every ported kernel, including **new** drivers where a
@@ -97,9 +100,15 @@ The infrastructure every batch draws on, built and probed once.
   `native_gr_postops`, `native_ple_postops`, `native_qsa`,
   `native_qsa_indexer`, `native_qsa_score`, `qsa_decode_attn`,
   `native_rope`, `native_router`, `s2_expert_grouped`, `s2_gemv_fast`,
-  `s2_gemv_quads`. **Known gaps needing new drivers:** `verify_kernels.cu`
-  (23 kernels, no parity file at all). B0's deliverable is the resolved
-  table — it fixes each batch's driver work.
+  `s2_gemv_quads`. **Known gaps needing new drivers:** 13 files (the
+  parent originally assumed 1–2) — `fused_gdn`, `native_flash_attn`,
+  `native_gdn`, `native_gdn_preprocess`, `native_gr_norm`, `native_moe`,
+  `native_ple_postops`, `native_qsa`, `native_qsa_score`, `native_router`,
+  `s2_expert_grouped`, `qsa_select` (its `qsa_select_bench` is a bench, not
+  a parity), `verify_kernels` (23 kernels, no parity file at all). B0's
+  deliverable is the resolved table (`plans/sycl-phase-b-report.md`
+  §B0.1) — it fixes each batch's driver work; ~10–12 dev-days of new
+  driver work land in the batch steps.
 - **B0.2 `sycl_compat/intrinsics.hpp`**, populated from the measured
   inventory:
   - Packed bytes: `__byte_perm`, `__vsub4`, `__vcmpne4`, `__vadd4`
@@ -115,8 +124,11 @@ The infrastructure every batch draws on, built and probed once.
     tolerance), `__fadd_rn`/`__fmaf_rn` (standard ops), `__popc`,
     `__trap`, `__threadfence_system` (queue-scope fence — verify the
     semantics match where it is used), `__int_as_float` (bit cast),
-    `__nv_bfloat16`/`__half` → `sycl::ext::oneapi::bfloat16` / `sycl::half`
-    (T4: no `sycl::fp16`, use `sycl::half` — validated bit-exact).
+    `__half` → `sycl::half` (T4: no `sycl::fp16`, use `sycl::half` —
+    validated bit-exact). B0 finding: the CUDA `__nv_bfloat16` type is
+    absent from all 40 unported kernels (they use `uint16_t` + the repo's
+    portable `bf16_bits.hpp`); the `__nv_bfloat16` typedef is kept as
+    Phase-C future-proofing only.
   - **TF32 conversion** (`qsa_select.cu:174`, `asm("cvt.rna.tf32.f32 …")`):
     the *other* of the two asm sites — not the tensor-core `mma`. Needs a
     bit-exact portable emulation (round mantissa to 10 bits, ties-away)
@@ -130,11 +142,13 @@ The infrastructure every batch draws on, built and probed once.
   if the measured cost is unacceptable** → Intel vendor-extension opt-in,
   decision written (Phase A risk-table rule: vendor extension only if the
   cost is unacceptable).
-- **B0.4 Dynamic shared memory** — the 6 `cudaFuncSetAttribute` sites
-  (measured: `fused_gr` ×2, `qsa` ×1, `qsa_prompt_attn` ×2, `qsa_select`
-  ×1; the research doc's "~7" is approximate) become call-site-sized
+- **B0.4 Dynamic shared memory** — the 5 `cudaFuncSetAttribute` sites
+  (measured: `fused_gr` ×1, `qsa` ×1, `qsa_prompt_attn` ×2, `qsa_select`
+  ×1; the parent's "6" counted a comment line in `fused_gr.cu`, and the
+  research doc's "~7" is approximate) become call-site-sized
   `local_accessor`s (no kernel-struct pattern, T3). The affected kernels
-  sit in B4/B5; B0 sizes and documents each.
+  sit in B4/B5; B0 sized and documented each
+  (`plans/sycl-phase-b-report.md` §B0.4).
 - **B0.5 Tree-layout decision** — confirm `poc/sycl/` stays the working
   tree through Phase B (recommendation: yes — the main-tree wiring is
   Phase D, and Phase A's "any need to touch `src/core` is by definition
@@ -154,13 +168,13 @@ batch is done when all its files are green and recorded.
 
 | batch | files (lines, `__global__`) | hazards | driver coverage | est |
 |---|---|---|---|---|
-| **B1 — elementwise / streaming** | `dequant_bf16` (248,1), `rope` (136,1), `native_rope` (102,1), `elementwise` (325,14), `quantize_act` (313,5), `cvec` (166,1), `native_bf16` (186,2), `native_gr_postops` (115,3), `native_gr_norm` (102,1), `kv_q8` (127,2), `native_qsa` (127,2) — 2,147 lines, 33 kernels | low: light shuffles (2 in cvec/elementwise), no packed bytes, small smem | `dequant_bf16` ✓, `rope`? (verify vs `rope_parity`), `cvec` ✓, `elementwise` ✓, `quantize_act` ✓, `kv_q8` ✓; `native_*` to verify at B0 | 3–4 d |
-| **B2 — GEMV / expert families** | `s2_gemv` (63,1), `s2_gemv_fast` (153,1), `s2_gemv_q8` (96,1, 1 dp4a), `s2_gemv_quads` (93,1), `bf16_gemv` (141,3), `shared_expert` (346,9), `s2_expert_grouped` (790,13), `native_mmvq` (1,493,9, 12 packed bytes) — 3,285 lines, 38 kernels | `native_mmvq` is the largest file and the packed-byte second hub; `s2_expert_grouped` is 13 kernels incl. the grouped GEMV; Phase A's T4 naive GEMV (4.6–16.9 G weights/s) is the baseline the `fast`/`quads` variants must beat — the perf headline of the ledger | `s2_gemv` ✓ (+ `s2_gemv_q8` ✓, `s_gemv_q8k` ✓ for the family), `bf16_gemv` ✓, `shared_expert` ✓; `s2_expert_grouped`, `native_mmvq` (`mmvq_multi_parity` covers `native_mmvq`) to verify | 5–6 d |
+| **B1 — elementwise / streaming** | `dequant_bf16` (248,1), `rope` (136,1), `native_rope` (102,1), `elementwise` (325,14), `quantize_act` (313,5), `cvec` (166,1), `native_bf16` (186,2), `native_gr_postops` (115,3), `kv_q8` (127,2) — 1,718 lines, 30 kernels | low: light shuffles (2 in cvec/elementwise), no packed bytes, small smem | `dequant_bf16` ✓, `rope` ✓ (rope_parity), `cvec` ✓, `elementwise` ✓, `quantize_act` ✓, `kv_q8` ✓, `native_rope` ✓ (rope_parity), `native_bf16` ✓ (ple/shared_expert parities), `native_gr_postops` ✓ (gr_parity) — all resolved by the B0 audit | 3–4 d |
+| **B2 — GEMV / expert families** | `s2_gemv` (63,1), `s2_gemv_fast` (153,1), `s2_gemv_q8` (96,1, 1 dp4a), `s2_gemv_quads` (93,1), `bf16_gemv` (141,3), `shared_expert` (346,9), `s2_expert_grouped` (790,13), `native_mmvq` (1,493,9, 12 packed bytes) — 3,175 lines, 38 kernels | `native_mmvq` is the largest file and the packed-byte second hub; `s2_expert_grouped` is 13 kernels incl. the grouped GEMV; Phase A's T4 naive GEMV (4.6–16.9 G weights/s) is the baseline the `fast`/`quads` variants must beat — the perf headline of the ledger | `s2_gemv` ✓ (+ `s2_gemv_q8` ✓, `s_gemv_q8k` ✓ for the family), `bf16_gemv` ✓, `shared_expert` ✓, `native_mmvq` ✓ (mmvq_multi_parity); `s2_expert_grouped` → **new driver (~1 d)** per the B0 audit | 5–6 d (+1 d driver) |
 | **B3 — KV + quantised weight access** | `kv_q4` (231,4), `kv_stream` (266,4), `iq_kernels` (748,8, 25 dp4a, 28 packed bytes) — 1,245 lines, 16 kernels | **the packed-byte/dp4a risk hub** — B0.2's payoff lands here; heavy quant-format bit twiddling | `kv_q4` ✓, `kv_stream` ✓, `kv_hybrid` ✓, `iq` ✓ | 2–3 d |
-| **B4 — GDN / GR attention family** | `gdn` (248,5), `fused_gdn` (166,3), `native_gdn` (122,1), `native_gdn_preprocess` (199,5), `gr` (432,6), `fused_gr` (405,5, 2 dynamic-smem sites) — 1,572 lines, 25 kernels | shuffle-heavy recurrent attention (the research doc's "attention/GDN" risk); `fused_gr` carries dynamic smem (B0.4); B0.3 primitives exercised at scale | `gdn` ✓, `gr` ✓; `fused_*`, `native_gdn*` to verify | 4–5 d |
-| **B5 — QSA family (hardest after T5)** | `qsa` (819,8, 1 dynamic-smem), `qsa_decode_attn` (298,2), `qsa_prompt_attn` (717,2, 9 shfl, 2 dynamic-smem), `qsa_select` (581,6, 30 smem sites, TF32-asm), `native_qsa_indexer` (263,4), `native_qsa_score` (213,2, tensor-core `mma` + **existing FP32-FMA fallback** — the fallback path is what ports; tensor cores dropped cleanly, research doc) — 2,891 lines, 24 kernels | densest shuffles + smem of the port; `qsa_prompt_attn` is prefill-shaped attention (kernel in scope; its host flow may touch Phase C); local-memory budget per kernel is the likely finding source (convention 9) | `qsa` ✓ (`qsa_parity`, `ngram.cpp`), `qsa_prompt_attn` ✓, `qsa_select` (`qsa_select_bench` is a bench, not a parity — **verify; possibly new driver**); `native_qsa_indexer`/`native_qsa_score` to verify | 6–8 d |
-| **B6 — MoE + PLE** | `native_moe` (86,1), `ple` (367,8), `native_ple_postops` (221,7) — 674 lines, 16 kernels | low-medium; `ple` has the `ple_oracle_vectors.inc` oracle to reuse | `ple` ✓; `native_moe` (`native_expert_parity`), `native_ple_postops` to verify | 1–2 d |
-| **B7 — verify kernels** | `verify_kernels` (559,23) — 23 kernels | **no parity driver exists** (B0.1): new driver, new observability contract (host users are Phase C's `verify.cpp` — kernel port stands alone); verify-window host staging explicitly out of scope | **new driver** | 2 d |
+| **B4 — GDN / GR attention family** | `gdn` (248,5), `fused_gdn` (166,3), `native_gdn` (122,1), `native_gdn_preprocess` (199,5), `native_flash_attn` (212,3, **assigned by B0**), `gr` (432,6), `fused_gr` (405,5, 2 dynamic-smem sites), `native_gr_norm` (102,1, moved from B1 by the B0 audit) — 1,886 lines, 29 kernels | shuffle-heavy recurrent attention (the research doc's "attention/GDN" risk); `fused_gr` carries dynamic smem (B0.4); B0.3 primitives exercised at scale | `gdn` ✓, `gr` ✓; `fused_gdn`, `native_gdn`, `native_gdn_preprocess` (1.5–2 d), `native_flash_attn` (1 d), `native_gr_norm` (0.5 d) → **new drivers** per the B0 audit | 4–5 d (+3–3.5 d drivers) |
+| **B5 — QSA family (hardest after T5)** | `qsa` (819,8, 1 dynamic-smem), `qsa_decode_attn` (298,2), `qsa_prompt_attn` (717,2, 9 shfl, 2 dynamic-smem), `qsa_select` (581,6, 30 smem sites, TF32-asm), `native_qsa_indexer` (263,4), `native_qsa_score` (213,2, tensor-core `mma` + **existing FP32-FMA fallback** — the fallback path is what ports; tensor cores dropped cleanly, research doc), `native_qsa` (127,2, moved from B1 by the B0 audit) — 3,018 lines, 26 kernels | densest shuffles + smem of the port; `qsa_prompt_attn` is prefill-shaped attention (kernel in scope; its host flow may touch Phase C); local-memory budget per kernel is the likely finding source (convention 9) | `qsa` ✓ (`qsa_parity`, `ngram.cpp`), `qsa_prompt_attn` ✓, `native_qsa_indexer` ✓ (qsa_parity); `qsa_select` (1 d), `native_qsa` + `native_qsa_score` (1–1.5 d) → **new drivers** per the B0 audit | 6–8 d (+2–2.5 d drivers) |
+| **B6 — MoE + PLE** | `native_moe` (86,1), `ple` (367,8), `native_ple_postops` (221,7), `native_router` (127,4, **assigned by B0**) — 801 lines, 20 kernels | low-medium; `ple` has the `ple_oracle_vectors.inc` oracle to reuse; `native_router` adds 4 light shuffles | `ple` ✓; `native_moe` + `native_ple_postops` (1–1.5 d), `native_router` (0.5 d) → **new drivers** per the B0 audit | 1–2 d (+1.5–2 d drivers) |
+| **B7 — verify kernels** | `verify_kernels` (559,23) — 23 kernels | **no parity driver exists** (B0.1): new driver, new observability contract (host users are Phase C's `verify.cpp` — kernel port stands alone); verify-window host staging explicitly out of scope | **new driver (~2 d)** per the B0 audit | 2 d (+2 d driver) |
 
 Batch order rationale (same as Phase A's): B1 keeps the pipeline warm on
 low-risk files; B2 lands the perf headline early; B3 isolates the
@@ -179,13 +193,14 @@ Phase A risk table) and recorded, not silently deferred.
 - **Per file with order-sensitive logic:** mutation test(s) designed, run,
   red-verified on the designed fixture, reverted — the T4/T5 protocol.
 - **Final (B8, est 2 d):** full-suite ctest 100 %; local-memory budget
-  table complete; **perf ledger** — one timed run per kernel family at
-  fixed shapes (streaming bandwidth for memory-bound, G weights/s for GEMV,
-  us/call where Phase A set a number), Arc-vs-rated-bandwidth shares,
-  joined to Phase A's ledger; `plans/sycl-phase-b-report.md` written — the
-  go/no-go input to Phase C, per the research doc's "deciding risk" framing
-  (what B learned about shuffle cost, dp4a availability, and smem budgets
-  is exactly what sizes C's doorbell/GEMM redesign).
+  table complete (all 40 files); **perf ledger** — one timed run per
+  kernel family at fixed shapes (streaming bandwidth for memory-bound,
+  G weights/s for GEMV, us/call where Phase A set a number),
+  Arc-vs-rated-bandwidth shares, joined to Phase A's ledger;
+  `plans/sycl-phase-b-report.md` written — the go/no-go input to Phase C,
+  per the research doc's "deciding risk" framing (what B learned about
+  shuffle cost, dp4a availability, and smem budgets is exactly what sizes
+  C's doorbell/GEMM redesign).
 
 ## Risks and stop-and-ask
 
@@ -202,7 +217,7 @@ Phase A risk table) and recorded, not silently deferred.
 
 ## Done when (Phase B complete)
 
-- [ ] All 38 remaining files ported (or a written deferral per the repo's
+- [ ] All 40 remaining files ported (or a written deferral per the repo's
       honest-gap convention stating the exact missing machinery — expected
       none, since Phase C machinery is host-side and the kernels are
       self-contained).
@@ -219,8 +234,9 @@ Phase A risk table) and recorded, not silently deferred.
       redesign, GEMM replacement, and mapped-staging decisions (shuffle
       cost, smem budgets, dp4a availability).
 
-**Effort:** B0 (2–3 d) + B1–B7 (23–31 d) + B8 (2 d) ≈ **27–36 dev-days
-(6–8 weeks)** for one developer with the Arc machine — inside the research
-doc's "several-month project" envelope once Phase C is added, consistent
-with its "mostly mechanical" read of this phase now that Phase A's
-pipeline exists.
+**Effort:** B0 (2–3 d) + B1–B7 (23–30 d porting **+ 10–12 d of new-driver
+work** — the B0 audit found 13 driver-less files, not 1–2) + B8 (2 d) ≈
+**~37–48 dev-days (8–10 weeks)** for one developer with the Arc machine —
+inside the research doc's "several-month project" envelope once Phase C is
+added, consistent with its "mostly mechanical" read of this phase now that
+Phase A's pipeline exists.

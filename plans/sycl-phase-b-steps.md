@@ -34,8 +34,18 @@ Infrastructure every later step draws on, built and probed once.
   confirmed / to-verify / new-driver table into a fixed file → parity
   driver mapping; deliverable: the resolved table (in this file's result
   block and the report), which fixes every later step's driver work.
-  Known new-driver work: `verify_kernels.cu` (Step 8); possibly
-  `qsa_select` (its `qsa_select_bench` is a bench, not a parity — Step 6).
+
+  **RESULT (done):** the resolved table is in
+  `plans/sycl-phase-b-report.md` §B0.1. Corrections to the parent: 44
+  `.cu` files total (not 42) → **40 remaining / 12,402 lines**; two
+  previously unassigned files placed (`native_flash_attn` → Step 5/B4,
+  `native_router` → Step 7/B6); **13 files need new drivers** (not 1–2):
+  `fused_gdn`, `native_flash_attn`, `native_gdn`, `native_gr_norm` (Step
+  5); `native_moe`, `native_ple_postops`, `native_router` (Step 7);
+  `native_qsa`, `native_qsa_score`, `qsa_select` (Step 6); `s2_expert_grouped`
+  (Step 3); `verify_kernels` (Step 8); plus `native_gdn_preprocess`
+  (Step 5). ~10–12 dev-days of that driver work lands in Steps 3–8.
+  `native_gr_norm` and `native_qsa` move out of Step 2 (B1) per the audit.
 - **1.2 `sycl_compat/intrinsics.hpp` + probes (parent B0.2).**
   - Packed bytes `__byte_perm`/`__vsub4`/`__vcmpne4`/`__vadd4` — u32
     bit-level implementations, each parity-probed against the CUDA
@@ -61,10 +71,12 @@ Infrastructure every later step draws on, built and probed once.
   the measured cost is unacceptable** → Intel vendor-extension opt-in,
   decision written. The decision lands **before** Steps 5 and 6
   (the shuffle-heavy batches), not inside them.
-- **1.4 Dynamic-smem sizing (parent B0.4).** The 6 `cudaFuncSetAttribute`
-  sites (`fused_gr` ×2, `qsa` ×1, `qsa_prompt_attn` ×2, `qsa_select` ×1)
-  → call-site-sized `local_accessor`s (no kernel-struct pattern — T3);
-  each sized and tabled, with its 128 KiB budget position.
+- **1.4 Dynamic-smem sizing (parent B0.4).** The 5 `cudaFuncSetAttribute`
+  sites (`fused_gr` ×1, `qsa` ×1, `qsa_prompt_attn` ×2, `qsa_select` ×1;
+  the parent's "6" counted a comment line in `fused_gr.cu`) →
+  call-site-sized `local_accessor`s (no kernel-struct pattern — T3);
+  each sized and tabled in `plans/sycl-phase-b-report.md` §B0.4, with its
+  128 KiB budget position.
 - **1.5 Tree-layout decision (parent B0.5).** Confirm `poc/sycl/` stays
   the working tree through Phase B (recommendation: yes); Phase D wires
   the main build.
@@ -73,28 +85,33 @@ Done when: coverage table resolved; the probe suite (packed bytes, dp4a,
 TF32, shuffle, smem sizes) green or fallbacks adopted and documented;
 decisions written in the report. The Step 1 outputs gate Steps 2–8.
 
+**RESULT (done):** all eight B0 probes green (ctest 27/27 incl. Phase A's
+19); `check_mirrors.sh` exit 0 (259 OK blocks); dp4a fallback stands
+(no oneAPI int8 dot); TF32 emulation **bit-exact** (the Step 6 gate is
+satisfied); shuffle primitives accepted at ~275 ns/shuffle (decision in
+report §B0.3); `__trap` silent-no-op finding recorded (report §B0.2);
+smem table complete (5 sites); tree layout documented.
+
 ## Step 2 — B1: elementwise / streaming batch (est 3–4 d)
 
-11 files / 2,147 lines / 33 kernels: `dequant_bf16` (248), `rope` (136),
+9 files / 1,718 lines / 30 kernels: `dequant_bf16` (248), `rope` (136),
 `native_rope` (102), `elementwise` (325, 14 kernels), `quantize_act` (313),
 `cvec` (166, 2 shfl), `native_bf16` (186), `native_gr_postops` (115),
-`native_gr_norm` (102), `kv_q8` (127), `native_qsa` (127).
+`kv_q8` (127). (`native_gr_norm` moved to Step 5 and `native_qsa` to
+Step 6 by the B0 audit.)
 
 Low-risk by the parent's hazard table: light shuffle use (2 sites each in
-`cvec`/`elementwise`), no packed bytes, small smem. Driver coverage from
-the Step 1 table: confirmed `dequant_bf16` ✓ (`dequant_bf16_test`),
-`cvec` ✓, `elementwise` ✓, `quantize_act` ✓, `kv_q8` ✓; `rope` (vs
-`rope_parity`), `native_rope`, `native_bf16`, `native_gr_postops`,
-`native_gr_norm`, `native_qsa` are verified there — anything the table
-leaves uncovered gets a driver written in this step, observability
-contract in the header.
+`cvec`/`elementwise`), no packed bytes, small smem. Driver coverage is
+fully resolved by the Step 1 table — every file in this batch has an
+existing driver (`dequant_bf16` ✓, `rope` ✓, `cvec` ✓, `elementwise` ✓,
+`quantize_act` ✓, `kv_q8` ✓, `native_rope` ✓, `native_bf16` ✓,
+`native_gr_postops` ✓) — so this step is mirror-only, no new drivers.
 
-Done when: all 11 files mirror-green, ctest-green, recorded; any new
-driver's "what this test can and cannot see" contract written.
+Done when: all 9 files mirror-green, ctest-green, recorded.
 
-## Step 3 — B2: GEMV / expert families (est 5–6 d)
+## Step 3 — B2: GEMV / expert families (est 5–6 d + 1 d driver)
 
-8 files / 3,285 lines / 38 kernels: `s2_gemv` (63), `s2_gemv_fast` (153),
+8 files / 3,175 lines / 38 kernels: `s2_gemv` (63), `s2_gemv_fast` (153),
 `s2_gemv_q8` (96, 1 dp4a), `s2_gemv_quads` (93), `bf16_gemv` (141, 3
 kernels), `shared_expert` (346, 9), `s2_expert_grouped` (790, 13),
 `native_mmvq` (1,493, 9, 12 packed-byte sites).
@@ -109,9 +126,9 @@ kernels), `shared_expert` (346, 9), `s2_expert_grouped` (790, 13),
 - `s2_gemv_q8` carries the batch's single `cuda_dp4a` — the Step 1.2
   dp4a mapping (or fallback) is validated here.
 - Drivers: `s2_gemv` ✓ (+ `s2_gemv_q8` ✓, `s_gemv_q8k` ✓ for the family),
-  `bf16_gemv` ✓, `shared_expert` ✓, `native_mmvq` via
-  `mmvq_multi_parity`; `s2_expert_grouped` per the Step 1 table (possibly
-  new driver).
+  `bf16_gemv` ✓, `shared_expert` ✓, `native_mmvq` ✓ (mmvq_multi_parity);
+  `s2_expert_grouped` → **new driver (~1 d)** per the Step 1 audit table,
+  with its observability contract in the header.
 
 Done when: all 8 files green and recorded; the GEMV-family perf table in
 the report with the T4 baseline quoted.
@@ -132,38 +149,44 @@ Done when: all 3 files green and recorded; dp4a availability outcome
 (hardware mapping vs fallback + perf) settled in the report — this is the
 last chance before B4/B5 rely on the intrinsic layer.
 
-## Step 5 — B4: GDN / GR attention family (est 4–5 d)
+## Step 5 — B4: GDN / GR attention family (est 4–5 d + 3–3.5 d drivers)
 
-6 files / 1,572 lines / 25 kernels: `gdn` (248, 5), `fused_gdn` (166, 3),
-`native_gdn` (122, 1), `native_gdn_preprocess` (199, 5), `gr` (432, 6),
-`fused_gr` (405, 5).
+8 files / 1,886 lines / 29 kernels: `gdn` (248, 5), `fused_gdn` (166, 3),
+`native_gdn` (122, 1), `native_gdn_preprocess` (199, 5), `native_flash_attn`
+(212, 3 — assigned here by the B0 audit), `gr` (432, 6), `fused_gr`
+(405, 5), `native_gr_norm` (102, 1 — moved here from B1 by the B0 audit).
 
 - Recurrent-attention kernels — the first real scale test of the Step 1.3
   shuffle primitives and of barrier-tree cost at 1,024 threads; the
   measured numbers go in the report (they size the B5 plan, not a guess).
 - `fused_gr` carries 2 of the 6 dynamic-smem sites (Step 1.4 sizing must
   have covered them); its 21 smem sites are the batch's budget row.
-- Drivers: `gdn` ✓, `gr` ✓; `fused_gdn`, `fused_gr`, `native_gdn`,
-  `native_gdn_preprocess` per the Step 1 table (possibly new drivers —
-  the fused kernels' host flow may touch Phase C machinery, but the
-  kernel + parity port stands alone per the parent's boundary rule).
+- Drivers: `gdn` ✓, `gr` ✓, `fused_gr` ✓ (cvec_parity, gr_parity); new
+  drivers per the Step 1 table: `fused_gdn` + `native_gdn` +
+  `native_gdn_preprocess` (1.5–2 d), `native_flash_attn` (1 d),
+  `native_gr_norm` (0.5 d) — each with its "what this test can and cannot
+  see" contract in the header. The fused kernels' host flow may touch
+  Phase C machinery, but the kernel + parity port stands alone per the
+  parent's boundary rule.
 
 Done when: all 6 files green and recorded; shuffle-cost numbers at this
 scale written.
 
-## Step 6 — B5: QSA family (est 6–8 d)
+## Step 6 — B5: QSA family (est 6–8 d + 2–2.5 d drivers)
 
-The hardest batch after Phase A's T5. 6 files / 2,891 lines / 24 kernels:
+The hardest batch after Phase A's T5. 7 files / 3,018 lines / 26 kernels:
 `qsa` (819, 8, 1 dynamic-smem site), `qsa_decode_attn` (298, 2),
 `qsa_prompt_attn` (717, 2, **9 shfl + 2 dynamic-smem sites**),
 `qsa_select` (581, 6, 30 smem sites, the TF32 `cvt.rna` asm),
 `native_qsa_indexer` (263, 4), `native_qsa_score` (213, 2, tensor-core
 `mma` — port the **existing FP32-FMA fallback path**, tensor cores dropped
-cleanly).
+cleanly), `native_qsa` (127, 2 — moved here from B1 by the B0 audit).
 
 - **Prerequisite (hard):** the Step 1.2 TF32 probe outcome is bit-exact
   or the finding is written and the tolerance path decided — no
-  `qsa_select` work on an unresolved asm emulation.
+  `qsa_select` work on an unresolved asm emulation. **RESOLVED (Step 1
+  done):** the emulation is bit-exact (0/1,056,744 differ), so this gate
+  passes with no tolerance-path examination.
 - `qsa_prompt_attn` is prefill-shaped attention: the kernel port is in
   scope; its host flow may lean on Phase C machinery — boundary rule
   applies, note it where touched.
@@ -174,25 +197,29 @@ cleanly).
   decision, not a silent edit.
 - Selection/tie/stage order in `qsa_select` and the score/indexer
   kernels → **mutation tests** per the standing convention.
-- Drivers: `qsa` ✓ (`qsa_parity`, `ngram.cpp`), `qsa_prompt_attn` ✓;
-  `qsa_select`'s `qsa_select_bench` is a bench, not a parity — per the
-  Step 1 table, likely a **new driver** with its own observability
-  contract; `qsa_decode_attn`, `native_qsa_indexer`, `native_qsa_score`
-  per the table.
+- Drivers: `qsa` ✓ (`qsa_parity`, `ngram.cpp`), `qsa_prompt_attn` ✓,
+  `qsa_decode_attn` ✓ (qsa_prompt_attn_parity, kv_hybrid, kv_stream),
+  `native_qsa_indexer` ✓ (qsa_parity); new drivers per the Step 1 table:
+  `qsa_select` (1 d — reuses `qsa_select_bench` data generation; its
+  bench is not a parity), `native_qsa` + `native_qsa_score` (1–1.5 d) —
+  each with its own observability contract in the header.
 
 Done when: all 6 files green and recorded (or the recorded findings say
 otherwise); mutation results in the report; the QSA smem-budget table
 complete.
 
-## Step 7 — B6: MoE + PLE (est 1–2 d)
+## Step 7 — B6: MoE + PLE (est 1–2 d + 1.5–2 d drivers)
 
-3 files / 674 lines / 16 kernels: `native_moe` (86, 1), `ple` (367, 8),
-`native_ple_postops` (221, 7).
+4 files / 801 lines / 20 kernels: `native_moe` (86, 1), `ple` (367, 8),
+`native_ple_postops` (221, 7), `native_router` (127, 4 — assigned here by
+the B0 audit; 4 light shuffles).
 
 Low-medium hazard; `ple` reuses the `ple_oracle_vectors.inc` oracle.
-Drivers: `ple` ✓; `native_moe` (`native_expert_parity` covers the
-native-expert pair — confirm against the Step 1 table) and
-`native_ple_postops` per the table (possibly new driver).
+Drivers: `ple` ✓; new drivers per the Step 1 table: `native_moe` +
+`native_ple_postops` (1–1.5 d — `native_expert_parity` covers the
+native-expert pair, confirm the `native_moe` coverage against it first),
+`native_router` (0.5 d) — each with its observability contract in the
+header.
 
 Done when: all 3 files green and recorded.
 
@@ -217,7 +244,7 @@ the report.
 - Full-suite ctest under `env -u LD_LIBRARY_PATH` — every parity entry
   green; `check_mirrors.sh` exit 0 across the whole tree (one red block
   anywhere fails the step).
-- **Local-memory budget table** complete (all 38 files, worst-shape rows,
+- **Local-memory budget table** complete (all 40 files, worst-shape rows,
   128 KiB cap position) — the Phase A §T5 table format.
 - **Perf ledger**: one timed run per kernel family at fixed shapes
   (streaming bandwidth for memory-bound, G weights/s for GEMV, us/call
@@ -251,7 +278,9 @@ report written with the Phase C handoff section.
 
 ## Total
 
-Step 1 (2–3 d) + Steps 2–8 (23–30 d) + Step 9 (2 d) ≈ **27–35
-dev-days** — matching the parent's **27–36 dev-days (6–8 weeks)** envelope
-for one developer with the Arc machine — inside the research doc's
-"several-month project" once Phase C is added.
+Step 1 (2–3 d) + Steps 2–8 (23–30 d porting **+ 10–12 d of new-driver
+work** — the B0 audit found 13 driver-less files, not 1–2; the per-step
+driver estimates are annotated above) + Step 9 (2 d) ≈ **~37–48 dev-days
+(8–10 weeks)** — the parent's original 27–36 d envelope re-based by the
+B0 audit, still inside the research doc's "several-month project" once
+Phase C is added.
