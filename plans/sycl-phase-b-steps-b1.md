@@ -32,7 +32,11 @@ documented ctest `WILL_FAIL`; mutation tested, report §B1.2),
 §B1.3), 2.5 ✓ (`dequant_bf16` + `iq_dequant` F4 closure; new F5 driver with
 --selftest; all 16 types bit-exact; `-Wno-c++11-narrowing` documented
 compiler exception; iq-only types lack a chain reference, report §B1.4),
-2.6–2.10 pending.
+2.6 ✓ (`elementwise`; 14 kernels + F6 execution smoke; two host-reference
+findings pinned and measured (icpx host constant-multiply fold; host
+`std::fma` is two-rounding → FMA3 reference); `rsqrtf` glue; all seven
+covered entries pass the mirrored gates, report §B1.5),
+2.7–2.10 pending.
 
 Inherited conventions (unchanged from Phase A/B0): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a

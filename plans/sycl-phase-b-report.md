@@ -379,4 +379,67 @@ writing; 2.4–2.10 pending.
   initially used the raw global id as `blockIdx.x` (one work-group per
   superblock); the driver's iq types failed 3814/4096 — fixed, all green.
 
+### B1.5 — `elementwise.cpp` + `elementwise_parity` (step 2.6)
+
+- **Scope**: all 14 kernels of `elementwise.cu` @ 22d022e (embedding gather,
+  gdn gate, scale/add, f16/bf16 bridges, silu, rms_norm_weighted, three
+  doorbell kernels, three mapped-copy kernels) plus the host dispatch, in
+  `poc/sycl/kernels/elementwise.cpp`; the driver mirrors the CUDA driver
+  `elementwise_parity.cpp` @ 9a8fc3f (its seven covered entries, comparison
+  logic verbatim) and adds an F6 execution smoke (below).
+- **Kernel-side findings (measured, all inside the mirrored gates)**:
+  - `rsqrtf` is NOT available to DPC++ device code (host-only libm macro;
+    probed: "SYCL kernel cannot call an undefined function"). Per the plan it
+    is a glue macro `1.0f / sqrtf(x)`; rms_norm_weighted measures
+    rel 4.05e-08 / worst 2.26e-07 against the f64 oracle, far under the CUDA
+    driver's own 1e-6 gate, and both rival readings stay 70–89 % apart.
+  - Device DOUBLE `exp` (silu) and device `log1pf`/`expf` (gdn_gate) compile
+    and run on Arc: silu rel 0.000e+00 (bit-exact vs the double reference),
+    gdn_gate rel 2.48e-08 ≤ 1e-6.
+  - `rms_norm_weighted`'s warp shuffles run on the B0 `shfl32` local-memory
+    emulation; the row guard (the QSA bug the comment describes) is exercised
+    by the padded 4-warp grid exactly as in CUDA.
+  - Work-groups of 1 (doorbell ring/wait) and 1024 (doorbell publish) are both
+    accepted on Arc; `__threadfence_system` maps to the B0 `threadfence()`
+    (G7 — the protocol itself is Phase C's gate), `strata_spin_pause` is an
+    empty spin (no device `__nanosleep`; dp4a.hpp deliberately not included,
+    B0 macro clash), `__shared__ int hit` becomes a handler-built
+    local_accessor with glue `it.barrier()` lines.
+- **Host-reference-side findings (driver-side, both measured, both pinned —
+  the mirrored kernel lines are untouched)**:
+  - icpx host -O2 transforms the scale oracle's single f32 multiply by the
+    compile-time constant `1.0f/sqrt(128.0f)`: 466 of the 1024 products came
+    1 ulp away from a true single f32 multiply (the device kernel's multiply
+    is the true one — a volatile-pinned reference matches it 1024/1024). The
+    oracle pins the multiply volatile, as the driver's own embedding comment
+    requires.
+  - icpx host `std::fma(f32)` is a TWO-rounding implementation (probed:
+    514,084 of 531,441 samples differ from the `vfmadd231ss` result), so it
+    cannot stand in for the fused product the embedding fixture's
+    `fma_diff > 0` non-vacuity check asserts. The reference uses the FMA3
+    instruction directly; with it the fixture shows 8141 FMA differences
+    (the check is non-vacuous) while the device output stays 0/108 cases off
+    (the kernel's `__fmul_rn`/`__fadd_rn` glue keeps the separate roundings).
+- **Parity: all seven covered entries pass under the CUDA driver's own
+  gates, verbatim** (gdn 2.48e-08 ≤ 1e-6; silu 0.000e+00 ≤ 1e-7; scale and
+  f32→f16 bit-exact; rms 4.05e-08 < 1e-6 with both rival readings observable;
+  embedding gather 108 row cases, 0 bit mismatches, 0 guard failures;
+  f32→bf16 NaN-kept: bulk 0/4096 vs the ggml rule, dequant type-8 0/64 —
+  linking k_dequant_bf16 for that slice).
+- **F6 (the plan's six uncovered entries)**: per the plan they are
+  compile-only in B1 — the mapped-pinned handoff protocol is gated in Phase C.
+  The driver still runs each once with a trivial oracle (identity copies,
+  the +0.0 hit row, seq increments, the immediate-exit wait): all pass. The
+  live spin path of `doorbell_wait` is NOT exercised: a single in-order queue
+  cannot hold a concurrent writer to device memory, and a second-queue race is
+  not a deterministic ctest. Recorded, not hidden.
+- **The CUDA driver's graph-capture block** is replaced by two ordered
+  in-order-queue launches (gather then scale): the same contract (no hidden
+  synchronization, caller's queue honored) without stream capture, which SYCL
+  does not have.
+- **Mutation test** (plan candidate: drop `/ cols` in rms_norm_weighted):
+  rel 9.375e-01, gate RED, revert → GREEN (mirror checker exit 0).
+- **Suite**: ctest 32/32 green (31 real passes + `k_quantize_act_parity`
+  inverted by its documented F8 `WILL_FAIL`), `check_mirrors.sh` exit 0.
+
 *(Batches B1–B8 append their sections here as they complete.)*
