@@ -52,7 +52,8 @@ barrier to the 32-wide spin barrier because the mirrored stage-2 shuffle
 runs inside a warp-0-only branch (measured: block-wide dot came out
 warp-local); project within 4.9e-7 of the double reference, add / off /
 untouched bit-exact, write-path checks park in B4 per F2, report §B1.8),
-2.10 pending.
+2.10 ✓ (batch closeout; suite 35/35, checker green, mutation tests all
+red-verified, parked-block amendments recorded, report §B1.9).
 
 Inherited conventions (unchanged from Phase A/B0): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a

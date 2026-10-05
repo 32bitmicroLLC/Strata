@@ -612,4 +612,32 @@ orthogonality max |h'·v + h·v| 35 vs the 1e-4/1e-3 gates.
 **Suite.** ctest **35/35** green (34 prior passes + `k_cvec_parity`),
 `check_mirrors.sh` exit 0.
 
+### B1.9 — Batch closeout (step 2.10)
+
+**Done-when checklist.** Ten B1 TUs under `poc/sycl/kernels/`
+(`rope`, `native_rope`, `quantize_act`, `native_gr_postops`, `dequant_bf16`,
+`iq_dequant`, `elementwise`, `kv_q8`, `native_bf16`, `cvec`), all compiled
+with icpx `-fsycl -O2 -std=c++20`. Eight ctest entries green under
+`env -u LD_LIBRARY_PATH` (each `TIMEOUT 120`), including
+`k_quantize_act_parity` as a documented `WILL_FAIL TRUE` under F8; suite
+total **35/35**. `check_mirrors.sh` exit 0 tree-wide. Mutation tests were
+run, red-verified, and reverted for every order-sensitive candidate
+(§B1.2–§B1.8 record the measured red values).
+
+**Parked-block amendments** (owned here until the B3–B5 step files are
+written):
+- **B3** — the `dequant_bf16` dispatch into `iq_kernels.cu` (F4) is now
+owned by B1: `iq_dequant.cpp` + `k_dequant_bf16_parity --selftest` cover the
+iq-only types byte-exactly.  B3 must not re-port that range.
+- **B4** — `cvec_parity.cpp`'s write-path section (CUDA lines ~148–190)
+and the fused-vs-cvec cross-check mirror blocks belong to B4's
+`fused_gr` driver (F2).  The only math gap there is the `__expf` 64-ulp
+fast-math gap inside `sigmoidf_` (B0-measured); everything else in that
+section is mirrored-order exact.
+- **B5** — `kv_q8`'s FP16 cross-check section belongs to B5's qsa driver
+(F3).
+
+**B1 status: complete (2.1–2.10).**  The B2 gate — predecessor B1 steps
+2.4–2.10 closed — is open.
+
 *(Batches B1–B8 append their sections here as they complete.)*
