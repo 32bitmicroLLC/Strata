@@ -36,7 +36,11 @@ compiler exception; iq-only types lack a chain reference, report §B1.4),
 findings pinned and measured (icpx host constant-multiply fold; host
 `std::fma` is two-rounding → FMA3 reference); `rsqrtf` glue; all seven
 covered entries pass the mirrored gates, report §B1.5),
-2.7–2.10 pending.
+2.7 ✓ (`kv_q8`; both kernels, q8 driver subset -- FP16 cross-check parks in
+B5 per F3; the F8 division gap is the step's one knife edge (variable
+`x / sf`); constant-divisor division probed IEEE-exact on the device;
+checks 1+2 bit-exact, mutation tested, report §B1.6),
+2.8–2.10 pending.
 
 Inherited conventions (unchanged from Phase A/B0): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a

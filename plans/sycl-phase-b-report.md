@@ -442,4 +442,50 @@ writing; 2.4–2.10 pending.
 - **Suite**: ctest 32/32 green (31 real passes + `k_quantize_act_parity`
   inverted by its documented F8 `WILL_FAIL`), `check_mirrors.sh` exit 0.
 
+### B1.6 — `kv_q8.cpp` + `kv_q8_parity` (step 2.7)
+
+- **Scope**: both kernels of `kv_q8.cu` @ fb2ccec (INT8 KV append with the
+  64-value group scale, and the gather that dequantizes selected cells into
+  the FP16 scratch) plus host dispatch; the driver mirrors the q8 half of
+  `kv_q8_parity.cpp` @ 733d7c7 (checks 1 and 2). Per F3, the FP16 pool calls
+  (`kv_append_step`/`kv_gather_step`, CUDA driver lines 44, 66, 101, 111,
+  116–117) and check #3 (INT8-vs-FP16 error ≤ 0.624 quantization steps,
+  lines 129–131, 138–139) park in B5's qsa driver.
+- **Port notes**: the 3-D append grid (n_head_kv, head_dim/64, 2) × 64 is
+  flattened to a 1-D launch of 2048 items (16 exact 64-wide work-groups); the
+  body resolves blockIdx.x/y/z from the global id (each CUDA block maps to
+  exactly one (h, g, is_v)). The block's two CUDA warps are the B0 `shfl32`
+  emulation's groups 0 and 1, and the `warp_max` shared float-2 is a
+  handler-built local_accessor with glue `it.barrier()` for the
+  `__syncthreads` (T3/router_top10/elementwise precedent). `char4`/`ushort4`
+  are glue PODs (DPC++'s `sycl::char4`/`ushort4` classes are different types;
+  the mirrored `reinterpret_cast` pattern needs trivially-copyable layouts).
+  `KvHostPools` is never populated by the driver (the mapped-pinned host pools
+  are Phase C's protocol, per the audit): the host-copy branch compiles but
+  is not exercised.
+- **F8 probe (new, measured)**: the kernel's two divisions behave
+  differently on the Arc device — constant-divisor division is IEEE-exact
+  (probed: 0/200,000 off), while variable-divisor division is the documented
+  F8 gap (53,062/200,000 off, 1 ulp). So `amax / 127.0f` (the scale) is safe,
+  and the variable-divisor `x / sf` inside `__float2int_rn` is this step's
+  single knife edge: a code byte can flip only when the division lands within
+  one f32 ulp of a half-integer tie — the same family as the Q8_K finding.
+  The bit-exact gate is kept (not widened): the margin analysis is written
+  here, and a future flip on a different fixture is a documented F8 instance,
+  not a port bug.
+- **Driver-side API note**: 2026.1's `queue::fill` takes
+  `fill<T>(ptr, value, count)` with an explicit template argument (the byte-
+  count spelling I first tried does not compile); the driver's `dalloc`
+  glue uses it with a zero value for the CUDA `cudaMemset`.
+- **Parity: checks 1 and 2 bit-exact** (487 filled cells × 2 KV heads ×
+  4 groups × 64 values × K,V: 497,664 code bytes and 7,808 scales, all
+  identical to the host reference; all 20 gather trials bit-identical to the
+  host dequantization of the stored codes) — 0 F8 flips on this fixture.
+- **Mutation test** (the order-sensitive logic: the two-warp reduction and
+  its fixed-order shared combine): narrowing the butterfly from `o = 16`
+  to `o = 8` breaks the warp max — 222,124 codes/scales off, gate RED;
+  revert → GREEN (mirror checker exit 0).
+- **Suite**: ctest 33/33 green (32 real passes + `k_quantize_act_parity`
+  inverted by its documented F8 `WILL_FAIL`), `check_mirrors.sh` exit 0.
+
 *(Batches B1–B8 append their sections here as they complete.)*

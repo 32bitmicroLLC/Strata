@@ -208,6 +208,14 @@ add_executable(k_elementwise_parity drivers/elementwise_parity.cpp)
 target_link_libraries(k_elementwise_parity PRIVATE k_elementwise k_dequant_bf16 k_iq_dequant)
 add_test(NAME k_elementwise_parity COMMAND k_elementwise_parity --selftest)
 
+# B1 step 2.7: the INT8 KV append/gather pair (kv_q8.cu @ fb2ccec).  The
+# driver mirrors the q8 half of the CUDA driver (F3: the FP16 pool section
+# and the INT8-vs-FP16 cross-check park in B5's qsa driver).
+add_library(k_kv_q8 STATIC kernels/kv_q8.cpp)
+add_executable(k_kv_q8_parity drivers/kv_q8_parity.cpp)
+target_link_libraries(k_kv_q8_parity PRIVATE k_kv_q8)
+add_test(NAME k_kv_q8_parity COMMAND k_kv_q8_parity --selftest)
+
 # The DPC++ driver only adds the SYCL runtime libraries when -fsycl is on the
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
 # CMAKE_CXX_LINK_OPTIONS does not reach the link line on CMake 4.2, per-target
@@ -218,7 +226,7 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
                     b0_dp4a_probe b0_byteperm_probe b0_packed4_probe b0_tf32_probe b0_half_probe
                     b0_misc_probe b0_shfl_probe b0_shfl_bench b0_divprobe b0_divprobe2 b0_q8k_audit b1_fma_probe
                     k_rope_parity k_quantize_act_parity k_native_gr_postops_parity k_dequant_bf16_parity
-                    k_elementwise_parity)
+                    k_elementwise_parity k_kv_q8_parity)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -241,6 +249,7 @@ set_tests_properties(k_quantize_act_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_native_gr_postops_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_dequant_bf16_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_elementwise_parity PROPERTIES TIMEOUT 120)
+set_tests_properties(k_kv_q8_parity PROPERTIES TIMEOUT 120)
 # F8 (plans/sycl-phase-b-report.md): icpx 2026.1 emits a NON-IEEE-correctly-rounded
 # float division on Arc (1 ulp, up to ~4 ulp through the Q8_K iscale->d chain), while
 # the host division in the same compiler is IEEE-exact (0/4,194,304 off).  The mirrored
