@@ -488,4 +488,81 @@ writing; 2.4–2.10 pending.
 - **Suite**: ctest 33/33 green (32 real passes + `k_quantize_act_parity`
   inverted by its documented F8 `WILL_FAIL`), `check_mirrors.sh` exit 0.
 
+### B1.7 — `native_bf16.cpp` + `native_bf16_parity` (step 2.8)
+
+- **Scope**: `src/kernels/cuda/native_bf16.cu` (186 lines, 2 kernels ×
+  instantiations via the 2×8 template dispatch macro). Finding F1 from the
+  plan: **no CUDA-side parity driver exists** for
+  `bf16_gemv_fp32_mmvf` / `bf16_gemv_fp32_mmvf_multi` (they are exercised
+  only through gr.cu / shared_expert.cu / ple.cu in B4/B2/B6), so this step
+  carries a NEW dedicated driver with its own transcribed reference and its
+  own contract.
+- **Contract pinned (F1)**: `y[o] = sum_i x[i] * w[o*n_in+i]` — ONE shared
+  activation row for every output row; the multi kernel runs one workgroup
+  per output column over `n_tok` activation rows and must be
+  bit-identical to each row's own single-row launch. The driver fixture
+  holds N_OUT+1 rows (1 shared + 8 multi); fixture values are kept in
+  |v| ≤ 2^9 so no sum overflows to inf/NaN (payload-bit NaN comparison
+  would be a platform artifact, out of scope for a bit-exact gate).
+- **Host-reference platform findings (new, all measured)**:
+  1. icpx host -O2 **flushes f32 subnormal intermediates to zero in plain
+     float addition** (`0x00000002 + 0.0f → 0x00000000`; gcc -O2 and icpx -O0
+     are exact). It also flushes double-subnormal intermediates, which is
+     why a double-precision FMA ground truth is unreliable under icpx -O2.
+  2. icpx host -O2 **miscompiles inline `vfmadd231ss` asm** — a subnormal
+     FMA result (e.g. 0x681) comes back as +0; the same bits under gcc -O2
+     -mfma and icpx -O0 are exact. A host FMA3-asm reference is therefore
+     unusable under icpx -O2.
+  3. Consequence: the host reference uses a **pure-C bit-exact f32 FMA**
+     (`fmaf_rn_ref`, 49-bit `__uint128_t` product, exact aligned integer sum,
+     RNE in subnormal-ulp units, the `__fmaf_rn` glue's signed-zero
+     correction mirrored). It is verified **200,000/200,000 bit-exact
+     against a gcc -mfma FMA3 build** over full-range finite f32 triples
+     (subnormals, zeros, mixed signs included). The butterfly additions are
+     the exact integer add `fmaf_rn_ref(a, 1.0f, b)` (the ×1.0 product is
+     exact in the integer domain), so **no host f32 arithmetic appears
+     anywhere in the references**.
+  4. The reference itself needed two fixes found during bring-up (a
+     zero-sign branch that encoded `-0` as `S = -1` and thus returned
+     `-1.0` for both-zero FMA shapes, and a term-alignment direction bug in
+     the sum) — both caught by fixed-case isolation and cross-checked
+     before the 200k gate; documented here rather than hidden.
+- **Device side**: `std::fmaf` on the Arc device is IEEE-exact on the 200k
+  fixture; its only signed-zero gap (exact-zero product with a +0 addend
+  returns the product's sign) is the documented B1 glue correction in
+  `intrinsics.hpp`. The NEW `b0/b1_fma_zero_probe.cpp` exhaustively asserts
+  **device fmaf + glue correction vs the IEEE-exact integer reference on all
+  125 degenerate zero combinations** (a, b, c ∈ {+0, -0, +1, -1, 2^-100}):
+  **0/125 differ**.
+- **float2 glue bug (found under this step, fixed)**: `intrinsics.hpp` had
+  declared `struct float2 { float x, y, z, w; }` (16 bytes) instead of CUDA's
+  8-byte `{x, y}` — every `float2*`-indexed kernel step read at 2× the right
+  offset, which is why the single-row port initially failed on every output.
+  Fixed in the glue with a comment; the B0 half probe's initializer was
+  updated to match. All other vector glue structs were audited and are
+  correct.
+- **Port notes**: block sizes 32…256 in steps of 32 launch as padded 1-D
+  work-groups with per-item bounds checks (Arc rejects non-uniform
+  work-groups); the `__shared__` partials arrays are handler-built local
+  accessors with glue `it.barrier()`; `__shfl_xor_sync` butterflies use the
+  B0 `shfl32` emulation; the 5-round butterfly and the two-stage shared
+  reduction are transcribed verbatim, so the accumulation order is a
+  mirrored property, not a tolerance. The kernel's adaptive block-size
+  selector is mirrored into the driver (`mmvf_block_size`) and proven to
+  reach all eight sizes (reps 2→32, 66→64, 130→96, 194→128, 258→160,
+  322→192, 386→224, 450→256).
+- **Parity**: single-row bit-exact on all eight block sizes (8 output rows
+  each); multi bit-exact vs the host reference for n_tok ∈ {2, 4, 8} and
+  bit-identical to each row's own single-row launch (the header contract);
+  the n_tok == 1 fast path matches the single-row kernel; the signed-zero
+  fixture (w = -0.0, x = 0, acc = +0) passes for the no-shared (32) and
+  shared (64) block sizes; 11 mirrored validation throws, 1 legal call
+  clean.
+- **Mutation test** (the order-sensitive logic): an all-ones fixture makes
+  every output the exact integer n_in; flipping one weight bit (1.0f →
+  2.0f) moves exactly row 0 from n_in to n_in+1 and no other row — the
+  gate is provably not blind.
+- **Suite**: ctest **34/34** green (33 prior passes + `k_native_bf16_parity`),
+  `check_mirrors.sh` exit 0.
+
 *(Batches B1–B8 append their sections here as they complete.)*

@@ -40,7 +40,14 @@ covered entries pass the mirrored gates, report §B1.5),
 B5 per F3; the F8 division gap is the step's one knife edge (variable
 `x / sf`); constant-divisor division probed IEEE-exact on the device;
 checks 1+2 bit-exact, mutation tested, report §B1.6),
-2.8–2.10 pending.
+2.8 ✓ (`native_bf16`; new F1 dedicated driver -- no CUDA-side parity
+coverage exists for these entries; all 8 adaptive block sizes bit-exact on
+single + multi; the host reference runs entirely in pure-C integer arithmetic
+because icpx host -O2 flushes f32/double subnormals in plain float ops and
+miscompiles inline FMA3 asm (both measured); device fmaf + glue verified on
+all 125 degenerate zero combinations; float2 glue-size bug found and fixed,
+mutation tested, report §B1.7),
+2.9–2.10 pending.
 
 Inherited conventions (unchanged from Phase A/B0): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a

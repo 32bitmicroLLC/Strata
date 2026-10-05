@@ -121,6 +121,8 @@ add_executable(b0_half_probe     b0/b0_half_probe.cpp)
 add_executable(b0_misc_probe     b0/b0_misc_probe.cpp)
 add_executable(b0_shfl_probe     b0/b0_shfl_probe.cpp)
 add_executable(b0_shfl_bench     b0/b0_shfl_bench.cpp)
+# B1 (step 2.8): the Arc device fmaf signed-zero table (drives the __fmaf_rn glue).
+add_executable(b1_fma_zero_probe b0/b1_fma_zero_probe.cpp)
 
 add_test(NAME smoke_parity COMMAND smoke_parity)
 add_test(NAME k_dequant_s2_parity COMMAND k_dequant_s2_parity --selftest)
@@ -216,6 +218,15 @@ add_executable(k_kv_q8_parity drivers/kv_q8_parity.cpp)
 target_link_libraries(k_kv_q8_parity PRIVATE k_kv_q8)
 add_test(NAME k_kv_q8_parity COMMAND k_kv_q8_parity --selftest)
 
+# B1 step 2.8: the BF16-weight FP32-activation MMVF (native_bf16.cu @ 1390a6a).
+# F1: no CUDA-side parity driver exists (the entries are exercised only through
+# gr.cu/shared_expert.cu/ple.cu), so the SYCL driver is a NEW dedicated one with
+# its own contract and bit-exact reference.  Gating B2 step 3.8.
+add_library(k_native_bf16 STATIC kernels/native_bf16.cpp)
+add_executable(k_native_bf16_parity drivers/native_bf16_parity.cpp)
+target_link_libraries(k_native_bf16_parity PRIVATE k_native_bf16)
+add_test(NAME k_native_bf16_parity COMMAND k_native_bf16_parity --selftest)
+
 # The DPC++ driver only adds the SYCL runtime libraries when -fsycl is on the
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
 # CMAKE_CXX_LINK_OPTIONS does not reach the link line on CMake 4.2, per-target
@@ -225,8 +236,9 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
                     k_sampler_parity t0_dev0 t0_bw_probe t0_bw_spike
                     b0_dp4a_probe b0_byteperm_probe b0_packed4_probe b0_tf32_probe b0_half_probe
                     b0_misc_probe b0_shfl_probe b0_shfl_bench b0_divprobe b0_divprobe2 b0_q8k_audit b1_fma_probe
+                    b1_fma_zero_probe
                     k_rope_parity k_quantize_act_parity k_native_gr_postops_parity k_dequant_bf16_parity
-                    k_elementwise_parity k_kv_q8_parity)
+                    k_elementwise_parity k_kv_q8_parity k_native_bf16_parity)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -250,6 +262,7 @@ set_tests_properties(k_native_gr_postops_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_dequant_bf16_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_elementwise_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_kv_q8_parity PROPERTIES TIMEOUT 120)
+set_tests_properties(k_native_bf16_parity PROPERTIES TIMEOUT 120)
 # F8 (plans/sycl-phase-b-report.md): icpx 2026.1 emits a NON-IEEE-correctly-rounded
 # float division on Arc (1 ulp, up to ~4 ulp through the Q8_K iscale->d chain), while
 # the host division in the same compiler is IEEE-exact (0/4,194,304 off).  The mirrored

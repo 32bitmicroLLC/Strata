@@ -184,7 +184,7 @@ int main() {
             __half2 b{__ushort_as_half((uint16_t) (dpb[i] & 0xffff)),
                       __ushort_as_half((uint16_t) (dpb[i] >> 16))};
             const __half2 s = __hsub2(a, b);
-            float2 fa{(float) a.x, (float) a.y, 0.f, 0.f}, fb{(float) b.x, (float) b.y, 0.f, 0.f};
+            float2 fa{(float) a.x, (float) a.y}, fb{(float) b.x, (float) b.y};
             const __half2 cross = __floats2half2_rn(fa, fb);
             const __half2 hh = __halves2half2(1.5f, -2.5f);
             dres[3 * i] = (uint32_t) __half_as_ushort(s.x) | ((uint32_t) __half_as_ushort(s.y) << 16);

@@ -40,8 +40,12 @@
 // the 40 files) and the half-precision spellings. GLOBAL scope: the
 // mirrored CUDA bodies name them unqualified from inside
 // namespace strata::kernels, which cannot see strata::sycl_compat members.
+// GLUE BUGFIX (B1 step 2.8 finding): this struct was declared with four
+// members (16 bytes), but CUDA's float2 is {x, y} (8 bytes).  Any kernel
+// indexing a float2* stepped at twice the right offset.  native_bf16 is the
+// first port to use float2, which is why the latent error surfaced here.
 struct float2 {
-    float x, y, z, w;
+    float x, y;
 };
 struct float4 {
     float x, y, z, w;
