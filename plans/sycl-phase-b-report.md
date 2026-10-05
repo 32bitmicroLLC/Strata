@@ -239,7 +239,7 @@ Phase D moves the tree into the main build with
 
 ---
 
-## B1 — elementwise / streaming batch (in progress)
+## B1 — elementwise / streaming batch (complete)
 
 Plan: `plans/sycl-phase-b-steps-b1.md`. Steps 2.1–2.3 complete as of this
 writing; 2.4–2.10 pending.
@@ -639,5 +639,47 @@ section is mirrored-order exact.
 
 **B1 status: complete (2.1–2.10).**  The B2 gate — predecessor B1 steps
 2.4–2.10 closed — is open.
+
+## B2 — GEMV / expert batch
+
+### B2.1 — `s2_gemv.cpp` + `s2_gemv_parity` (step 3.1)
+
+**Scope.** One kernel (`s2_gemv.cu`, 63 lines, source `c1ff5cf`): the P2.S2
+GEMV, one thread per output row — dequantize on the fly, FP32 accumulation,
+no shared memory, no vector loads.  The parity driver mirrors
+`s2_gemv_parity.cpp` @ `ab69379` (173 lines): the 25-pattern fp16 `kScales`
+table (deliberately not all powers of two — the anti-vacuity guard), the
+raw-Q2_0-block reference chain through `strata::dequantize_q2_0` (the scalar
+decode that `dequant_xcheck` proved equal to ggml), the relative-error
+verdict, and the spread check.
+
+**Glue.** 1-D padded launch (128-wide work-groups, the T2
+non-uniform-work-group rule; padded items die at the mirrored `o >= n_out`
+check); `__half2float(__ushort_as_half(xb[j]))` → `sycl::half` widening
+through the same two bytes (T4-proven); `exit(1)` → `throw
+std::runtime_error` (same message); the wrapper's `cudaDeviceSynchronize` →
+the returned `sycl::event`.  No B0 intrinsics, no shared memory, no shuffles
+— the step doubles as the batch's idiom dry run.  Driver memory/sync is the
+ctx/USM idiom; `check(cudaError_t)` is not mirrored (SYCL throws).  The
+host reference loop keeps plain f32 arithmetic: the smallest nonzero term
+is 2^-10 × 2^-10 = 2^-20 (every `kScales` entry has |value| ≥ 2^-10), so no
+intermediate can reach the f32 subnormal band that icpx host -O2 flushes
+(§B1.7) — the margin is written in the driver header, not assumed.
+
+**Parity.** 0 of 640 rows over tolerance, **worst rel 0.000e+00** (tol
+1e-5); reference spread [−1155, 5062] (non-vacuous).  The device kernel and
+the host reference come out bit-identical: icpx contracts the mirrored
+`acc += (code-1) * d * x` the same way on both sides, and the reference
+accumulates in the kernel's order — the measured zero, not a hiding zero,
+because the full-mantissa `kScales` entries make every product round.
+
+**Mutation** (measured): MSB-first nibble extraction
+(`(3 - (j & 3)) * 2` instead of `(j & 3) * 2`) → **640 of 640 rows over
+tolerance, worst rel 1.386e+02**, first bad row 0 (ref 2190.87329 vs got
+1120.24756), exit 1.  Reverted, green again.
+
+**Suite.** ctest **36/36** green (35 prior passes + `k_s2_gemv_parity`,
+TIMEOUT 120), `check_mirrors.sh` exit 0 (14 new blocks: 7 kernel + 7
+driver).
 
 *(Batches B1–B8 append their sections here as they complete.)*

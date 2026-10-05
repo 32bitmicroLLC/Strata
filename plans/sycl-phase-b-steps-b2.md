@@ -25,7 +25,7 @@ Scope: the parent's 8 files / 3,175 lines / 38 kernels, **plus the unowned remai
 | 3.10 | `s2_expert_grouped.cu` | 790 / 13 | **none** (F10) | **new** `s2_expert_grouped_parity.cpp` |
 | 3.11 | — | — | — | batch close: suite, checker, report, parked-block amendments |
 
-Status (updated as each step lands): 3.1–3.11 pending.
+Status (updated as each step lands): 3.1 done (report §B2.1); 3.2–3.11 pending.
 
 Inherited conventions (unchanged from Phase A/B0/B1): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a
