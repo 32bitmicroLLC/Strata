@@ -47,7 +47,12 @@ because icpx host -O2 flushes f32/double subnormals in plain float ops and
 miscompiles inline FMA3 asm (both measured); device fmaf + glue verified on
 all 125 degenerate zero combinations; float2 glue-size bug found and fixed,
 mutation tested, report §B1.7),
-2.9–2.10 pending.
+2.9 ✓ (`cvec`; the shfl32 emulation's join moved from the work-group
+barrier to the 32-wide spin barrier because the mirrored stage-2 shuffle
+runs inside a warp-0-only branch (measured: block-wide dot came out
+warp-local); project within 4.9e-7 of the double reference, add / off /
+untouched bit-exact, write-path checks park in B4 per F2, report §B1.8),
+2.10 pending.
 
 Inherited conventions (unchanged from Phase A/B0): mirror blocks byte-verbatim with
 original indentation; glue carries lambda indentation; no DPC++ fix may touch a

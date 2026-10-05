@@ -124,6 +124,11 @@ add_executable(b0_shfl_bench     b0/b0_shfl_bench.cpp)
 # B1 (step 2.8): the Arc device fmaf signed-zero table (drives the __fmaf_rn glue).
 add_executable(b1_fma_zero_probe b0/b1_fma_zero_probe.cpp)
 
+# B1 (step 2.9): the control vector (plans/sycl-phase-b-steps-b1.md).
+add_library(k_cvec STATIC kernels/cvec.cpp)
+add_executable(k_cvec_parity drivers/cvec_parity.cpp)
+target_link_libraries(k_cvec_parity PRIVATE k_cvec)
+
 add_test(NAME smoke_parity COMMAND smoke_parity)
 add_test(NAME k_dequant_s2_parity COMMAND k_dequant_s2_parity --selftest)
 add_test(NAME t3_sg_probe   COMMAND t3_sg_probe)
@@ -226,6 +231,7 @@ add_library(k_native_bf16 STATIC kernels/native_bf16.cpp)
 add_executable(k_native_bf16_parity drivers/native_bf16_parity.cpp)
 target_link_libraries(k_native_bf16_parity PRIVATE k_native_bf16)
 add_test(NAME k_native_bf16_parity COMMAND k_native_bf16_parity --selftest)
+add_test(NAME k_cvec_parity COMMAND k_cvec_parity --selftest)
 
 # The DPC++ driver only adds the SYCL runtime libraries when -fsycl is on the
 # LINK line as well (compile-only -fsycl leaves libsycl undefined). Verified:
@@ -238,7 +244,7 @@ foreach(t smoke_parity k_dequant_s2_parity t3_sg_probe k_router_top10_parity t4_
                     b0_misc_probe b0_shfl_probe b0_shfl_bench b0_divprobe b0_divprobe2 b0_q8k_audit b1_fma_probe
                     b1_fma_zero_probe
                     k_rope_parity k_quantize_act_parity k_native_gr_postops_parity k_dequant_bf16_parity
-                    k_elementwise_parity k_kv_q8_parity k_native_bf16_parity)
+                    k_elementwise_parity k_kv_q8_parity k_native_bf16_parity k_cvec_parity)
   target_link_options(${t} PRIVATE -fsycl ${_rpath_opts})
   # UMF must be a direct dependency: the Level Zero adapter dlopens it, and
   # dlopen from a shared library does NOT consult the executable's RPATH.
@@ -263,6 +269,7 @@ set_tests_properties(k_dequant_bf16_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_elementwise_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_kv_q8_parity PROPERTIES TIMEOUT 120)
 set_tests_properties(k_native_bf16_parity PROPERTIES TIMEOUT 120)
+set_tests_properties(k_cvec_parity PROPERTIES TIMEOUT 120)
 # F8 (plans/sycl-phase-b-report.md): icpx 2026.1 emits a NON-IEEE-correctly-rounded
 # float division on Arc (1 ulp, up to ~4 ulp through the Q8_K iscale->d chain), while
 # the host division in the same compiler is IEEE-exact (0/4,194,304 off).  The mirrored

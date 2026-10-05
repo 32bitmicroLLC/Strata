@@ -565,4 +565,51 @@ writing; 2.4–2.10 pending.
 - **Suite**: ctest **34/34** green (33 prior passes + `k_native_bf16_parity`),
   `check_mirrors.sh` exit 0.
 
+### B1.8 — `cvec.cpp` + `cvec_parity` (step 2.9)
+
+**Scope.** One kernel (`cvec.cu`, 166 lines, source `74d73e7`): per-stream
+representation steering — a block-wide dot `s = h·v` (two-stage 256-thread
+reduction through `__shared__ float part[8]` and two 16-round `__shfl_xor_sync`
+butterflies) followed by the per-element update `h' = h - s·(h·v)·v` (steer,
+mode 0), `h' = h + v` (add, mode 1), plus an optional pending fused-GR write
+(`write=true`). The fused-GR cross-check and the `write=true` path both
+exercise `__expf` (64-ulp gap, B0-measured) and depend on B4's `fused_gr.cu`
+→ parked per F2; the driver covers the steering (mode 0, s = 2 and s = 1),
+untouched layers, the switch-off gate, the add path, and the mirrored
+validation throws. `__shared__` → handler-built `part` local accessor (same
+name, so the mirrored lines are unchanged); 2-D `(hc, T)` grid flattened to a
+padded 1-D launch; the 64-device table plumbing collapses to a single
+`DevTables` slot (the mirrored `kDevices`/`cur_device` stay verbatim, glue
+returns 0); SYCL's no-globals-in-kernel rule is met by reading the mirrored
+globals into locals before `submit`.
+
+**Finding — the shfl32 join is now the 32-wide spin barrier.**  The B0
+`shfl32` emulation joined each shuffle round with the work-group barrier.
+That is correct only when the shuffle runs uniformly in every warp.  cvec's
+mirrored second reduction stage runs inside `if (threadIdx.x < 32) { … }` —
+in CUDA that is a warp-local instruction, but in the emulation it became
+five work-group barriers reached by 32 of 256 threads, which the other seven
+warps raced past: the block-wide dot came out warp-local (measured 8× low;
+fixture: all-ones `h`, unit `v` — 2240 of 2560 elements wrong).  The fix is in
+the glue, not the mirror: every `shfl*_sync`/`ballot_sync` now joins with
+`syncwarp()` (the 32-wide generation-counter barrier from `b0_shfl_probe`),
+which is exactly the participation set a CUDA warp shuffle requires.  All
+shuffle-using ports (kv_q8, elementwise, native_bf16, …) were re-run green
+after the change.
+
+**Parity.** Project: max |err| **4.9e-7** vs the double-precision reference
+(mirrored accumulation order; gate 1e-4 for s = 2, 1e-3 for s = 1), orthogonality
+max |h'·v + h·v| 1.6e-6; s = 1 projects the direction out within the same
+gate. Bit-exact: an un-steered layer leaves `R` untouched; with the switch
+off and no pending write, `R` is bit-unchanged; the add path is `h + d` in
+every stream bitwise (the host reference uses the pure-C integer-exact
+`fmaf_rn_ref`, because icpx host -O2 flushes f32 subnormals — §B1.7). The
+`cvec_enabled()` gate follows the switch; `n_embd` / table-size validation
+throws are mirrored.  **Mutation** (measured): flipping the update sign
+(`-dot` → `+dot`) fails the project gate by O(1) — max |err| 2.73,
+orthogonality max |h'·v + h·v| 35 vs the 1e-4/1e-3 gates.
+
+**Suite.** ctest **35/35** green (34 prior passes + `k_cvec_parity`),
+`check_mirrors.sh` exit 0.
+
 *(Batches B1–B8 append their sections here as they complete.)*

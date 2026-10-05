@@ -167,12 +167,21 @@ struct shfl32 {
 
     // CUDA: value from lane (base + ((lane - base) ^ lane_mask)), width a
     // power of two, base = lane & ~(width-1).
+    //
+    // B1 finding (cvec, step 2.9): the join is the 32-WIDE spin barrier, not
+    // the work-group barrier.  A CUDA warp shuffle is warp-local, and the
+    // mirrored code may lawfully run one inside a branch that only some
+    // warps take (cvec's second reduction stage runs in warp 0 only); a
+    // work-group barrier there would make the other warps race past it --
+    // measured: cvec's stage-2 dot came out warp-local (8x off) instead of
+    // block-wide.  The spin barrier syncs exactly the 32 lanes of the group
+    // (its visibility was probed in b0_shfl_probe).
     template <class T> T shfl_xor_sync(uint32_t mask, T v, int lane_mask, int width = 32) {
         require_full_mask(mask);
         const uint32_t base = lane & ~(uint32_t)(width - 1);
         const uint32_t src = base + ((lane - base) ^ (uint32_t) lane_mask);
         store(slot_of(group, lane), v);
-        it.barrier();
+        syncwarp();
         return load<T>(slot_of(group, src));
     }
 
@@ -182,7 +191,7 @@ struct shfl32 {
         const uint32_t base = lane & ~(uint32_t)(width - 1);
         const uint32_t src = lane + (uint32_t) delta;
         store(slot_of(group, lane), v);
-        it.barrier();
+        syncwarp();
         return src >= base + (uint32_t) width ? v : load<T>(slot_of(group, src));
     }
 
@@ -193,17 +202,19 @@ struct shfl32 {
         const uint32_t base = lane & ~(uint32_t)(width - 1);
         const uint32_t src = lane < (uint32_t) delta ? lane : lane - (uint32_t) delta;
         store(slot_of(group, lane), v);
-        it.barrier();
+        syncwarp();
         return lane < (uint32_t) delta ? v : load<T>(slot_of(group, src));
     }
 
     // CUDA: value from source lane of the sub-warp (srcLane relative to base).
+    // (shfl_sync / ballot_sync carry the same warp-wide join for the same
+    // reason as shfl_xor_sync above.)
     template <class T> T shfl_sync(uint32_t mask, T v, int src_lane, int width = 32) {
         require_full_mask(mask);
         const uint32_t base = lane & ~(uint32_t)(width - 1);
         const uint32_t src = base + ((uint32_t) src_lane & ((uint32_t) width - 1u));
         store(slot_of(group, lane), v);
-        it.barrier();
+        syncwarp();
         return load<T>(slot_of(group, src));
     }
 
@@ -211,7 +222,7 @@ struct shfl32 {
     uint32_t ballot_sync(uint32_t mask, int pred) {
         require_full_mask(mask);
         la[slot_of(group, lane)] = pred ? 1u : 0u;
-        it.barrier();
+        syncwarp();
         uint32_t r = 0;
         for (int i = 0; i < 32; ++i)
             r |= la[slot_of(group, (uint32_t) i)] << (uint32_t) i;
@@ -490,6 +501,14 @@ using __nv_bfloat16 = sycl::ext::oneapi::bfloat16;
 #define __fmul_rn(a, b) (::strata::sycl_compat::fmul_rn((a), (b)))
 #define __fdiv_rn(a, b) (::strata::sycl_compat::fdiv_rn((a), (b)))
 #define __fmaf_rn(a, b, c) (::strata::sycl_compat::fmaf_rn((a), (b), (c)))
+// CUDA's bare device fmaf is IEEE-exactly-rounded; the Arc device's std::fmaf
+// matches it except the documented signed-zero gap, so the bare spelling
+// routes through the same glue correction as __fmaf_rn.  (Defined after
+// fmaf_rn above so its own std::fmaf call is unaffected.)
+#define fmaf(a, b, c) (::strata::sycl_compat::fmaf_rn((a), (b), (c)))
+// CUDA __syncthreads: the SYCL work-group barrier (the mirrored lines keep
+// their spelling; `it` is the body function's nd_item).
+#define __syncthreads() it.barrier()
 #define __dadd_rn(a, b) (::strata::sycl_compat::dadd_rn((a), (b)))
 #define __dmul_rn(a, b) (::strata::sycl_compat::dmul_rn((a), (b)))
 #define __ddiv_rn(a, b) (::strata::sycl_compat::ddiv_rn((a), (b)))
