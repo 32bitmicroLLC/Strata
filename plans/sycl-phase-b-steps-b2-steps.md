@@ -287,6 +287,9 @@ fixture spread.)
 
 ## Step 3.2 — `s2_gemv_q8.cu` (96 lines, 1 kernel)
 
+Detailed execution plan: `plans/sycl-phase-b-steps-b2-step-2.md` (written;
+status pending).
+
 - **Files**: `poc/sycl/kernels/s2_gemv_q8.cpp`; driver mirrors
   `src/kernels/s2_gemv_q8_parity.cpp`.
 - **Mirror**: constants 30–31, `s2_gemv_q8_kernel` 33–69, wrapper 77–96.
